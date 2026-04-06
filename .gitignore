@@ -1,0 +1,20 @@
+.codex
+
+# Local environment and secrets
+*.env
+*.local
+
+# Python cache and virtualenvs
+__pycache__/
+*.py[cod]
+.venv/
+.python-version
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local Google credential files
+credentials.json
+chat-service-account.json
