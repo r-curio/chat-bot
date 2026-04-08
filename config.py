@@ -11,6 +11,35 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 
+def _materialize_secret_file(env_var: str, target: Path) -> None:
+    """Write a JSON secret from an env var to disk if the file doesn't exist.
+
+    Used so deployments (e.g. Railway) can ship credential JSON via env vars
+    without committing them to the repo.
+    """
+    contents = os.getenv(env_var)
+    if not contents:
+        return
+    if target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(contents)
+
+
+def _bootstrap_secret_files() -> None:
+    _materialize_secret_file("GMAIL_OAUTH_CLIENT_JSON", BASE_DIR / "credentials.json")
+    _materialize_secret_file(
+        "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON", BASE_DIR / "chat-service-account.json"
+    )
+    gac_path = BASE_DIR / "google-application-credentials.json"
+    _materialize_secret_file("GOOGLE_APPLICATION_CREDENTIALS_JSON", gac_path)
+    if gac_path.exists() and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(gac_path)
+
+
+_bootstrap_secret_files()
+
+
 @dataclass(frozen=True)
 class Settings:
     gemini_api_key: str
