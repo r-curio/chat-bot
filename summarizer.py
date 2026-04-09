@@ -292,6 +292,18 @@ def _find_source_email(
     return None
 
 
+def _inject_open_thread_link(
+    text: str,
+    *,
+    item_number: int,
+    thread_url: str,
+) -> str:
+    item_marker = f"💬 Reply \"tweak {item_number}: [your instruction]\" to update this draft"
+    if item_marker in text:
+        return text.replace(item_marker, f"↳ Open thread: {thread_url}\n{item_marker}", 1)
+    return text
+
+
 def _display_sender(sender: str) -> str:
     match = re.search(r"^(.+?)\s*<([^>]+)>$", sender.strip())
     if match:
@@ -588,6 +600,12 @@ async def attach_thread_draft_links(
                 )
                 if fallback_link:
                     updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+                elif f"↳ Open thread: {updated_draft.thread_url}" not in updated_text:
+                    updated_text = _inject_open_thread_link(
+                        updated_text,
+                        item_number=updated_draft.number,
+                        thread_url=updated_draft.thread_url,
+                    )
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
                 updated_text += (
                     f'\n\nDraft {updated_draft.number} was not saved in Gmail yet. '
@@ -620,6 +638,12 @@ async def attach_thread_draft_links(
                 )
                 if fallback_link:
                     updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+                elif f"↳ Open thread: {updated_draft.thread_url}" not in updated_text:
+                    updated_text = _inject_open_thread_link(
+                        updated_text,
+                        item_number=updated_draft.number,
+                        thread_url=updated_draft.thread_url,
+                    )
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
                 updated_draft.compose_url = updated_draft.thread_url
                 updated_draft.draft_status = "not_saved"
@@ -636,6 +660,12 @@ async def attach_thread_draft_links(
                 )
                 if fallback_link:
                     updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+                elif f"↳ Open thread: {updated_draft.thread_url}" not in updated_text:
+                    updated_text = _inject_open_thread_link(
+                        updated_text,
+                        item_number=updated_draft.number,
+                        thread_url=updated_draft.thread_url,
+                    )
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
                 updated_draft.compose_url = updated_draft.thread_url
             updated_draft.draft_status = status
@@ -660,6 +690,12 @@ async def attach_thread_draft_links(
         )
         if fallback_link and updated_draft.thread_url:
             updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+        elif updated_draft.thread_url and f"↳ Open thread: {updated_draft.thread_url}" not in updated_text:
+            updated_text = _inject_open_thread_link(
+                updated_text,
+                item_number=updated_draft.number,
+                thread_url=updated_draft.thread_url,
+            )
         updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
         updated_text += f"\n\nDraft {updated_draft.number} was saved in Gmail on this thread."
         updated_drafts.append(updated_draft)

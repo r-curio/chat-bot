@@ -178,6 +178,72 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rendered.drafts[0].draft_id, "draft-1")
         self.assertEqual(rendered.drafts[0].draft_status, "saved")
 
+    async def test_summarize_emails_inserts_thread_link_without_sender_email(self) -> None:
+        digest = SummaryDigest(
+            high=BucketSection(
+                summary="Meeting invites need attention.",
+                items=[
+                    BucketItem(
+                        sender="Jenzelle Dianne Antonio",
+                        subject="Invitation: AI Rendering Workflow",
+                        summary="Meeting invitation for today.",
+                        draft_reply="Hi Jenzelle, Thanks for the invitation! I'll be there.",
+                        time_note="Meeting today, Apr 9, 1:30 PM GMT+8",
+                    )
+                ],
+            ),
+            medium=BucketSection(summary="", items=[]),
+            low=BucketSection(summary="", items=[]),
+            reminders=[],
+        )
+        fake_agent = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(output=digest)))
+        user = {
+            "id": 1,
+            "summary_style": "brief",
+            "summary_length": "medium",
+            "summary_focus": "all",
+            "summary_prompt_mode": "structured",
+            "reply_tone": "warm",
+            "draft_replies_high": 1,
+            "draft_replies_medium": 1,
+            "draft_replies_low": 0,
+            "include_reminders": 1,
+        }
+
+        with (
+            patch("summarizer._build_agent", return_value=fake_agent),
+            patch(
+                "summarizer.upsert_thread_draft",
+                new=AsyncMock(
+                    return_value={
+                        "status": "saved",
+                        "draft_id": "draft-2",
+                        "thread_id": "thread-2",
+                        "thread_url": "https://mail.google.com/mail/u/0/#all/thread-2",
+                    }
+                ),
+            ),
+        ):
+            rendered = await summarize_emails(
+                [
+                    {
+                        "gmail_message_id": "gmail-2",
+                        "thread_id": "thread-2",
+                        "sender": "Jenzelle Dianne Antonio",
+                        "reply_to": "Jenzelle Dianne Antonio <jenzelle@example.com>",
+                        "subject": "Invitation: AI Rendering Workflow",
+                        "snippet": "Please join this meeting.",
+                        "received_at": "2026-04-09T08:00:00+00:00",
+                        "message_id_header": "<invite-1@example.com>",
+                        "references": "",
+                    }
+                ],
+                user=user,
+            )
+
+        self.assertIn("↳ Open thread: https://mail.google.com/mail/u/0/#all/thread-2", rendered.text)
+        self.assertIn('💬 Reply "tweak 1: [your instruction]"', rendered.text)
+
 
 if __name__ == "__main__":
     unittest.main()
