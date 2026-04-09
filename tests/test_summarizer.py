@@ -146,6 +146,7 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
                         "draft_id": "draft-1",
                         "thread_id": "thread-1",
                         "thread_url": "https://mail.google.com/mail/u/0/#all/thread-1",
+                        "draft_url": "https://mail.google.com/mail/u/0/#drafts/draft-1",
                     }
                 ),
             ),
@@ -170,13 +171,14 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Urgent follow-ups.", rendered.text)
         self.assertIn("✍️ Draft reply:", rendered.text)
         self.assertIn("Hi Alice, I’ll approve this shortly.", rendered.text)
-        self.assertIn("↳ Open thread: https://mail.google.com/mail/u/0/#all/thread-1", rendered.text)
+        self.assertIn("↳ Open draft: https://mail.google.com/mail/u/0/#drafts/draft-1", rendered.text)
         self.assertIn("Draft 1 was saved in Gmail on this thread.", rendered.text)
         self.assertIn("*Reminders*", rendered.text)
         self.assertTrue(rendered.drafts)
         self.assertEqual(rendered.drafts[0].number, 1)
         self.assertEqual(rendered.drafts[0].draft_id, "draft-1")
         self.assertEqual(rendered.drafts[0].draft_status, "saved")
+        self.assertEqual(rendered.drafts[0].draft_url, "https://mail.google.com/mail/u/0/#drafts/draft-1")
 
     async def test_summarize_emails_inserts_thread_link_without_sender_email(self) -> None:
         digest = SummaryDigest(
@@ -220,6 +222,7 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
                         "draft_id": "draft-2",
                         "thread_id": "thread-2",
                         "thread_url": "https://mail.google.com/mail/u/0/#all/thread-2",
+                        "draft_url": "https://mail.google.com/mail/u/0/#drafts/draft-2",
                     }
                 ),
             ),
@@ -241,7 +244,7 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
                 user=user,
             )
 
-        self.assertIn("↳ Open thread: https://mail.google.com/mail/u/0/#all/thread-2", rendered.text)
+        self.assertIn("↳ Open draft: https://mail.google.com/mail/u/0/#drafts/draft-2", rendered.text)
         self.assertIn('💬 Reply "tweak 1: [your instruction]"', rendered.text)
 
 

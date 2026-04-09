@@ -511,7 +511,7 @@ def _build_tweak_response(
     lines.append(f"> {draft_reply.strip()}")
     compose_url = updated_draft.get("compose_url")
     if compose_url:
-        lines.append(f"↳ Open thread: {compose_url}")
+        lines.append(f"{'↳ Open draft' if updated_draft.get('draft_status') == 'saved' else '↳ Open thread'}: {compose_url}")
     draft_status = updated_draft.get("draft_status")
     if draft_status == "saved":
         lines.append("Saved as a Gmail draft on this thread.")
@@ -576,7 +576,8 @@ async def handle_tweak_request(
         updated_target["draft_id"] = draft_link.get("draft_id")
         updated_target["thread_id"] = draft_link.get("thread_id") or target.get("thread_id")
         updated_target["thread_url"] = draft_link.get("thread_url")
-        updated_target["compose_url"] = draft_link.get("thread_url") or target.get("compose_url")
+        updated_target["draft_url"] = draft_link.get("draft_url")
+        updated_target["compose_url"] = draft_link.get("draft_url") or draft_link.get("thread_url") or target.get("compose_url")
     else:
         updated_target["draft_status"] = "not_saved"
         updated_target["compose_url"] = updated_target.get("compose_url") or target.get("compose_url")

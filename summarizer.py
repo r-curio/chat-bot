@@ -130,6 +130,7 @@ class RenderedDraftItem(BaseModel):
     references: str | None = None
     draft_id: str | None = None
     draft_status: str | None = None
+    draft_url: str | None = None
     tweak_hint: str | None = None
 
 
@@ -297,10 +298,11 @@ def _inject_open_thread_link(
     *,
     item_number: int,
     thread_url: str,
+    label: str = "↳ Open thread:",
 ) -> str:
     item_marker = f"💬 Reply \"tweak {item_number}: [your instruction]\" to update this draft"
     if item_marker in text:
-        return text.replace(item_marker, f"↳ Open thread: {thread_url}\n{item_marker}", 1)
+        return text.replace(item_marker, f"{label} {thread_url}\n{item_marker}", 1)
     return text
 
 
@@ -523,6 +525,7 @@ def render_summary_digest(
                     references=None,
                     draft_id=None,
                     draft_status=None,
+                    draft_url=None,
                     tweak_hint=f'tweak {item_number}: [your instruction]' if reply_needed else None,
                 )
             )
@@ -605,6 +608,7 @@ async def attach_thread_draft_links(
                         updated_text,
                         item_number=updated_draft.number,
                         thread_url=updated_draft.thread_url,
+                        label="↳ Open thread:",
                     )
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
                 updated_text += (
@@ -643,6 +647,7 @@ async def attach_thread_draft_links(
                         updated_text,
                         item_number=updated_draft.number,
                         thread_url=updated_draft.thread_url,
+                        label="↳ Open thread:",
                     )
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
                 updated_draft.compose_url = updated_draft.thread_url
@@ -665,6 +670,7 @@ async def attach_thread_draft_links(
                         updated_text,
                         item_number=updated_draft.number,
                         thread_url=updated_draft.thread_url,
+                        label="↳ Open thread:",
                     )
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
                 updated_draft.compose_url = updated_draft.thread_url
@@ -680,7 +686,8 @@ async def attach_thread_draft_links(
         updated_draft.draft_id = draft_link.get("draft_id")
         updated_draft.thread_id = draft_link.get("thread_id") or updated_draft.thread_id
         updated_draft.thread_url = draft_link.get("thread_url")
-        updated_draft.compose_url = draft_link.get("thread_url") or updated_draft.compose_url
+        updated_draft.draft_url = draft_link.get("draft_url")
+        updated_draft.compose_url = draft_link.get("draft_url") or draft_link.get("thread_url") or updated_draft.compose_url
         updated_draft.draft_status = "saved"
 
         fallback_link = _compose_url(
@@ -688,15 +695,18 @@ async def attach_thread_draft_links(
             f"Re: {updated_draft.subject.strip()}",
             updated_draft.draft_reply,
         )
-        if fallback_link and updated_draft.thread_url:
-            updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
-        elif updated_draft.thread_url and f"↳ Open thread: {updated_draft.thread_url}" not in updated_text:
+        preferred_url = updated_draft.draft_url or updated_draft.thread_url
+        preferred_label = "↳ Open draft:"
+        if fallback_link and preferred_url:
+            updated_text = updated_text.replace(fallback_link, preferred_url, 1)
+        elif preferred_url and f"{preferred_label} {preferred_url}" not in updated_text:
             updated_text = _inject_open_thread_link(
                 updated_text,
                 item_number=updated_draft.number,
-                thread_url=updated_draft.thread_url,
+                thread_url=preferred_url,
+                label=preferred_label,
             )
-        updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
+        updated_text = updated_text.replace("↳ Send this:", preferred_label, 1)
         updated_text += f"\n\nDraft {updated_draft.number} was saved in Gmail on this thread."
         updated_drafts.append(updated_draft)
 

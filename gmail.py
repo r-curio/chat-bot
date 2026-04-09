@@ -124,6 +124,12 @@ def _thread_url(thread_id: str | None) -> str | None:
     return f"https://mail.google.com/mail/u/0/#all/{thread_id}"
 
 
+def _draft_url(draft_id: str | None) -> str | None:
+    if not draft_id:
+        return None
+    return f"https://mail.google.com/mail/u/0/#drafts/{draft_id}"
+
+
 def _build_reply_raw_message(email: dict[str, Any], draft_reply: str) -> str:
     message = EmailMessage()
     reply_to = str(email.get("reply_to") or email.get("sender") or "").strip()
@@ -220,14 +226,17 @@ async def upsert_thread_draft(
             "draft_id": None,
             "thread_id": email.get("thread_id"),
             "thread_url": _thread_url(str(email.get("thread_id") or "")),
+            "draft_url": None,
         }
 
     thread_id = str(email.get("thread_id") or draft.get("message", {}).get("threadId") or "")
+    draft_id_value = draft.get("id")
     return {
         "status": "saved",
-        "draft_id": draft.get("id"),
+        "draft_id": draft_id_value,
         "thread_id": thread_id or None,
         "thread_url": _thread_url(thread_id),
+        "draft_url": _draft_url(str(draft_id_value or "")),
     }
 
 
