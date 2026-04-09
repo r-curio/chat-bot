@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -22,6 +23,9 @@ SYSTEM_PROMPT = (
     "Gmail-derived same-day meetings, deadlines, or similarly time-sensitive obligations. "
     "Be concise, practical, and action-oriented."
 )
+
+MAX_THREAD_DRAFTS_PER_SUMMARY = 3
+THREAD_DRAFT_TIMEOUT_SECONDS = 2.5
 
 MEETING_HINTS = (
     "meeting",
@@ -548,6 +552,7 @@ async def attach_thread_draft_links(
     available_emails = [dict(email) for email in emails]
     updated_text = summary.text
     updated_drafts: list[RenderedDraftItem] = []
+    attempted_drafts = 0
 
     for draft in summary.drafts:
         updated_draft = draft.model_copy(deep=True)
@@ -569,13 +574,47 @@ async def attach_thread_draft_links(
         updated_draft.gmail_message_id = source_email.get("gmail_message_id")
         updated_draft.message_id_header = source_email.get("message_id_header")
         updated_draft.references = source_email.get("references")
+        if updated_draft.thread_id:
+            updated_draft.thread_url = f"https://mail.google.com/mail/u/0/#all/{updated_draft.thread_id}"
 
-        draft_link = await upsert_thread_draft(
-            user,
-            email=source_email,
-            draft_reply=updated_draft.draft_reply,
-        )
+        if attempted_drafts >= MAX_THREAD_DRAFTS_PER_SUMMARY:
+            if updated_draft.thread_url:
+                fallback_link = _compose_url(
+                    updated_draft.sender_email,
+                    f"Re: {updated_draft.subject.strip()}",
+                    updated_draft.draft_reply,
+                )
+                if fallback_link:
+                    updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+                updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
+                updated_draft.compose_url = updated_draft.thread_url
+            updated_drafts.append(updated_draft)
+            continue
+
+        attempted_drafts += 1
+        try:
+            draft_link = await asyncio.wait_for(
+                upsert_thread_draft(
+                    user,
+                    email=source_email,
+                    draft_reply=updated_draft.draft_reply,
+                ),
+                timeout=THREAD_DRAFT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            draft_link = None
+
         if not draft_link:
+            if updated_draft.thread_url:
+                fallback_link = _compose_url(
+                    updated_draft.sender_email,
+                    f"Re: {updated_draft.subject.strip()}",
+                    updated_draft.draft_reply,
+                )
+                if fallback_link:
+                    updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+                updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
+                updated_draft.compose_url = updated_draft.thread_url
             updated_drafts.append(updated_draft)
             continue
 
