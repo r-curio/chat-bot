@@ -9,13 +9,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from db import update_token
 
-GMAIL_SCOPES = [
+GMAIL_READ_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+GMAIL_COMPOSE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
 ]
@@ -24,9 +26,9 @@ EMAIL_PATTERN = re.compile(r"<([^>]+)>")
 RE_PREFIX_PATTERN = re.compile(r"^\s*re\s*:\s*", re.IGNORECASE)
 
 
-def _build_credentials(token_json: str) -> Credentials:
+def _build_credentials(token_json: str, scopes: list[str]) -> Credentials:
     token_info = json.loads(token_json)
-    return Credentials.from_authorized_user_info(token_info, scopes=GMAIL_SCOPES)
+    return Credentials.from_authorized_user_info(token_info, scopes=scopes)
 
 
 def _refresh_credentials(credentials: Credentials) -> str:
@@ -35,15 +37,15 @@ def _refresh_credentials(credentials: Credentials) -> str:
     return credentials.to_json()
 
 
-def _build_service(token_json: str):
-    credentials = _build_credentials(token_json)
+def _build_service(token_json: str, scopes: list[str]):
+    credentials = _build_credentials(token_json, scopes)
     refreshed_token_json = _refresh_credentials(credentials)
     service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
     return service, refreshed_token_json
 
 
 def _fetch_recent_emails_sync(token_json: str) -> tuple[list[dict[str, str]], str]:
-    service, refreshed_token_json = _build_service(token_json)
+    service, refreshed_token_json = _build_service(token_json, GMAIL_READ_SCOPES)
     recent_after = int((datetime.now(UTC) - timedelta(hours=24)).timestamp())
     response = (
         service.users()
@@ -152,7 +154,10 @@ def _upsert_thread_draft_sync(
     draft_reply: str,
     draft_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
-    service, refreshed_token_json = _build_service(token_json)
+    try:
+        service, refreshed_token_json = _build_service(token_json, GMAIL_COMPOSE_SCOPES)
+    except RefreshError:
+        return None, token_json
     raw_message = _build_reply_raw_message(email, draft_reply)
     message_body = {
         "raw": raw_message,
@@ -181,7 +186,7 @@ def _upsert_thread_draft_sync(
                 )
                 .execute()
             )
-    except HttpError:
+    except (HttpError, RefreshError):
         return None, refreshed_token_json
 
     return draft, refreshed_token_json
