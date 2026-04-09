@@ -13,10 +13,12 @@ from pydantic_ai import Agent
 from config import get_settings
 
 SYSTEM_PROMPT = (
-    "You are an email assistant for Google Chat. Summarize unread email into high, medium, and low "
-    "urgency buckets. Draft replies only for the buckets the user has enabled. Use the user's saved "
-    "reply tone when writing drafts. Include reminders only when the user has enabled reminders and "
-    "only for Gmail-derived same-day meetings, deadlines, or similarly time-sensitive obligations. "
+    "You are an email assistant for Google Chat. Summarize recent Gmail from the last 24 hours into "
+    "high, medium, and low urgency buckets. Draft replies only for clearly reply-worthy emails such as "
+    "direct asks, meeting invites, approval requests, or urgent follow-ups. Never draft replies for "
+    "status updates, FYIs, newsletters, or other informational mail. Use the user's saved reply tone "
+    "when writing drafts. Include reminders only when the user has enabled reminders and only for "
+    "Gmail-derived same-day meetings, deadlines, or similarly time-sensitive obligations. "
     "Be concise, practical, and action-oriented."
 )
 
@@ -154,10 +156,10 @@ def _preference_prompt(preferences: SummaryPreferences) -> str:
         "long": "Include fuller detail where useful, but keep it readable in Chat.",
     }
     focus_instructions = {
-        "all": "Cover all relevant unread emails.",
-        "urgent": "Emphasize urgent items, deadlines, and reply-needed emails.",
-        "action-items": "Emphasize concrete actions the user likely needs to take.",
-        "meetings": "Emphasize meeting-related emails, scheduling, and timing-sensitive items.",
+        "all": "Cover all relevant recent emails from the last 24 hours.",
+        "urgent": "Emphasize urgent items, deadlines, and reply-needed emails from the last 24 hours.",
+        "action-items": "Emphasize concrete actions the user likely needs to take from the last 24 hours.",
+        "meetings": "Emphasize meeting-related emails, scheduling, and timing-sensitive items from the last 24 hours.",
     }
     draft_scope = ", ".join(
         scope
@@ -293,6 +295,86 @@ def apply_draft_style_tweak(current_style: str, instruction: str) -> str:
     return _merge_style_note(current_style, instruction)
 
 
+def _looks_like_update_or_fyi(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "status update",
+            "weekly update",
+            "project update",
+            "update",
+            "fyi",
+            "for your information",
+            "newsletter",
+            "digest",
+            "announcement",
+            "recap",
+            "summary",
+            "no action needed",
+            "no reply needed",
+            "informational",
+            "keeping you posted",
+            "keeping you in the loop",
+        )
+    )
+
+
+def _looks_like_reply_worthy(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "meeting invite",
+            "meeting",
+            "invite",
+            "invitation",
+            "can you",
+            "could you",
+            "please",
+            "need your",
+            "your input",
+            "approval",
+            "approve",
+            "confirm",
+            "response needed",
+            "action required",
+            "reply",
+            "follow up",
+            "follow-up",
+            "schedule",
+            "availability",
+            "reschedule",
+            "urgent",
+            "asap",
+            "by eod",
+            "decision",
+            "sign off",
+            "review",
+            "deadline",
+        )
+    )
+
+
+def _is_reply_worthy_item(item: BucketItem) -> bool:
+    text = " ".join(
+        part
+        for part in (
+            item.sender,
+            item.subject,
+            item.summary,
+            item.time_note or "",
+            item.draft_reply or "",
+        )
+        if part
+    )
+    if not item.reply_needed or not item.draft_reply:
+        return False
+    if _looks_like_update_or_fyi(text):
+        return False
+    return _looks_like_reply_worthy(text)
+
+
 def _bucket_header(urgency: str) -> str:
     return {
         "high": "🔴 *Urgent*",
@@ -309,11 +391,13 @@ def build_summary_prompt(
     normalized_emails = [EmailSummaryInput.model_validate(email).model_dump() for email in emails]
     reminder_json = [candidate.model_dump() for candidate in reminder_candidates]
     return (
-        "Classify these unread emails into three buckets: high, medium, and low urgency. "
+        "Classify these recent emails from the last 24 hours into three buckets: high, medium, and low urgency. "
         "For each bucket, write one concise summary sentence and itemize the most relevant emails in the same order as the input. "
         "For each item, provide sender, subject, summary, a short time_note if the email mentions a meeting time or deadline, "
-        "and a draft_reply when the item should be replied to. Use null for draft_reply and reply_needed=false when no reply is needed. "
-        "For high and medium urgency, include a short draft reply for each item when draft replies are enabled. "
+        "and a draft_reply only when the item is clearly reply-worthy. Use null for draft_reply and reply_needed=false when no reply is needed. "
+        "Draft replies should be limited to direct asks, meeting invites, approval requests, or urgent follow-ups. "
+        "Do not include draft replies for updates, FYIs, newsletters, or similar informational mail. "
+        "For high and medium urgency, include a short draft reply only when the item is clearly reply-worthy and draft replies are enabled. "
         "Do not include draft replies in low urgency. "
         "For reminders, convert only the provided reminder candidates into short same-day reminder lines if reminders are enabled. "
         "Keep the output practical and specific for Google Chat.\n\n"
@@ -350,15 +434,11 @@ def render_summary_digest(
             sections.append(title)
 
             email_address = _extract_email_address(item.sender)
-            reply_needed = bool(item.reply_needed and item.draft_reply)
+            reply_needed = _is_reply_worthy_item(item)
             if reply_needed and show_drafts:
                 sections.append("✍️ Draft reply:")
                 sections.append(f"> {item.draft_reply.strip()}")
-                compose_url = _compose_url(
-                    email_address,
-                    f"Re: {item.subject.strip()}",
-                    item.draft_reply.strip(),
-                )
+                compose_url = _compose_url(email_address, f"Re: {item.subject.strip()}", item.draft_reply.strip())
                 if compose_url:
                     sections.append(f"↳ Send this: {compose_url}")
                 sections.append(f'💬 Reply "tweak {item_number}: [your instruction]" to update this draft')
@@ -379,8 +459,10 @@ def render_summary_digest(
                     compose_url=_compose_url(
                         email_address,
                         f"Re: {item.subject.strip()}",
-                        item.draft_reply.strip() if item.draft_reply else item.summary.strip(),
-                    ),
+                        item.draft_reply.strip() if reply_needed and item.draft_reply else item.summary.strip(),
+                    )
+                    if reply_needed
+                    else None,
                     tweak_hint=f'tweak {item_number}: [your instruction]' if reply_needed else None,
                 )
             )
@@ -400,7 +482,7 @@ async def summarize_emails(
     user: dict[str, Any],
 ) -> SummaryResult:
     if not emails:
-        return SummaryResult(text="No unread emails right now.", drafts=[])
+        return SummaryResult(text="No recent emails from the last 24 hours.", drafts=[])
 
     preferences = _preferences_from_user(user)
     reminder_candidates = (

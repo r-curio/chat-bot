@@ -87,11 +87,13 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("⚪ *Low priority*", rendered.text)
         self.assertIn("✍️ Draft reply:", rendered.text)
         self.assertIn("Hi Alice, I reviewed it and will approve it shortly.", rendered.text)
-        self.assertIn("Thanks Ben, I’ll send the revised timeline today.", rendered.text)
+        self.assertNotIn("Thanks Ben, I’ll send the revised timeline today.", rendered.text)
         self.assertNotIn("This should not be shown.", rendered.text)
+        self.assertIn("No reply needed — Reply with the revised timeline.", rendered.text)
         self.assertIn("↳ Send this:", rendered.text)
         self.assertIn('💬 Reply "tweak 1: [your instruction]"', rendered.text)
         self.assertIn("*Reminders*", rendered.text)
+        self.assertFalse(rendered.drafts[1].reply_needed)
 
     async def test_summarize_emails_uses_agent_output_and_user_preferences(self) -> None:
         digest = SummaryDigest(

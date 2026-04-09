@@ -14,7 +14,7 @@ from google.oauth2 import service_account
 
 from config import Settings, get_settings
 from db import clear_chat_conversation_state, get_all_users, get_user_by_install_id, save_chat_conversation_state
-from gmail import fetch_unread_emails
+from gmail import fetch_recent_emails
 from storage import get_storage_backend, store_audio
 from summarizer import SummaryResult, summarize_emails
 from tts import generate_audio
@@ -60,7 +60,7 @@ async def send_gchat_message(space_id: str, text: str) -> None:
 
 
 async def build_summary_text_for_user(user: dict) -> SummaryResult:
-    emails = await fetch_unread_emails(user)
+    emails = await fetch_recent_emails(user)
     return await summarize_emails(emails, user=user)
 
 

@@ -108,7 +108,7 @@ def _help_text() -> str:
     return (
         "*Available Commands*\n\n"
         "*Summaries*\n"
-        "- `/summary` Get your unread Gmail summary now.\n"
+        "- `/summary` Get your Gmail summary from the last 24 hours now.\n"
         "- `/testsummary` Preview a summary using your saved preferences.\n\n"
         "*Schedule*\n"
         "- `/settime HH:MM Area/City` Set your daily summary time and timezone.\n"

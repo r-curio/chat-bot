@@ -102,7 +102,7 @@ def _help_text() -> str:
     return (
         "*Available Commands*\n\n"
         "*Summaries*\n"
-        "- `/summary` Get your unread Gmail summary now.\n"
+        "- `/summary` Get your Gmail summary from the last 24 hours now.\n"
         "- `/testsummary` Preview a summary using your saved preferences.\n\n"
         "*Schedule*\n"
         "- `/settime HH:MM Area/City` Set your daily summary time and timezone.\n"
@@ -568,7 +568,7 @@ async def handle_tweak_request(
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
-    "summary": ToolSpec("summary", "Fetch the unread Gmail summary now.", False, tool_summary),
+    "summary": ToolSpec("summary", "Fetch the Gmail summary from the last 24 hours now.", False, tool_summary),
     "testsummary": ToolSpec("testsummary", "Preview a summary using saved preferences.", False, tool_test_summary),
     "settings": ToolSpec("settings", "Show the user's current summary preferences.", False, tool_settings),
     "settime": ToolSpec("settime", "Change the daily summary time and timezone.", True, tool_set_time),
@@ -594,7 +594,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 def build_tool_catalog_text() -> str:
     lines = [
         "Available tools:",
-        "- summary: fetch the unread Gmail summary now",
+        "- summary: fetch the Gmail summary from the last 24 hours now",
         "- testsummary: preview a summary using saved preferences",
         "- settings: show the user's current summary preferences",
         "- settime: change the daily summary time and timezone; args: hour, minute, timezone",

@@ -17,7 +17,7 @@ GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 EMAIL_PATTERN = re.compile(r"<([^>]+)>")
 
 
-def _fetch_unread_emails_sync(token_json: str) -> tuple[list[dict[str, str]], str]:
+def _fetch_recent_emails_sync(token_json: str) -> tuple[list[dict[str, str]], str]:
     token_info = json.loads(token_json)
     credentials = Credentials.from_authorized_user_info(token_info, scopes=GMAIL_SCOPES)
 
@@ -25,11 +25,11 @@ def _fetch_unread_emails_sync(token_json: str) -> tuple[list[dict[str, str]], st
         credentials.refresh(Request())
 
     service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
-    recent_after = int((datetime.now(UTC) - timedelta(hours=48)).timestamp())
+    recent_after = int((datetime.now(UTC) - timedelta(hours=24)).timestamp())
     response = (
         service.users()
         .messages()
-        .list(userId="me", q=f"is:unread after:{recent_after}")
+        .list(userId="me", q=f"after:{recent_after} -in:spam -in:trash")
         .execute()
     )
 
@@ -68,16 +68,20 @@ def _fetch_unread_emails_sync(token_json: str) -> tuple[list[dict[str, str]], st
     return emails, credentials.to_json()
 
 
-async def fetch_unread_emails(user: dict[str, Any]) -> list[dict[str, str]]:
+async def fetch_recent_emails(user: dict[str, Any]) -> list[dict[str, str]]:
     token_json = user.get("gmail_token_json")
     if not token_json:
         raise ValueError("User does not have a Gmail token.")
 
-    emails, refreshed_token_json = await asyncio.to_thread(_fetch_unread_emails_sync, token_json)
+    emails, refreshed_token_json = await asyncio.to_thread(_fetch_recent_emails_sync, token_json)
     if refreshed_token_json != token_json:
         await update_token(user["id"], refreshed_token_json)
     exclusions = {value.lower() for value in user.get("exclusions", [])}
     return [email for email in emails if not _is_excluded(email, exclusions)]
+
+
+async def fetch_unread_emails(user: dict[str, Any]) -> list[dict[str, str]]:
+    return await fetch_recent_emails(user)
 
 
 def _extract_sender_address(sender: str) -> str:
