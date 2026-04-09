@@ -157,7 +157,7 @@ def _upsert_thread_draft_sync(
     try:
         service, refreshed_token_json = _build_service(token_json, GMAIL_COMPOSE_SCOPES)
     except RefreshError:
-        return None, token_json
+        return {"status": "missing_compose_scope"}, token_json
     raw_message = _build_reply_raw_message(email, draft_reply)
     message_body = {
         "raw": raw_message,
@@ -187,7 +187,7 @@ def _upsert_thread_draft_sync(
                 .execute()
             )
     except (HttpError, RefreshError):
-        return None, refreshed_token_json
+        return {"status": "error"}, refreshed_token_json
 
     return draft, refreshed_token_json
 
@@ -214,9 +214,17 @@ async def upsert_thread_draft(
         await update_token(user["id"], refreshed_token_json)
     if not draft:
         return None
+    if "status" in draft:
+        return {
+            "status": draft["status"],
+            "draft_id": None,
+            "thread_id": email.get("thread_id"),
+            "thread_url": _thread_url(str(email.get("thread_id") or "")),
+        }
 
     thread_id = str(email.get("thread_id") or draft.get("message", {}).get("threadId") or "")
     return {
+        "status": "saved",
         "draft_id": draft.get("id"),
         "thread_id": thread_id or None,
         "thread_url": _thread_url(thread_id),

@@ -142,6 +142,7 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
                 "summarizer.upsert_thread_draft",
                 new=AsyncMock(
                     return_value={
+                        "status": "saved",
                         "draft_id": "draft-1",
                         "thread_id": "thread-1",
                         "thread_url": "https://mail.google.com/mail/u/0/#all/thread-1",
@@ -170,10 +171,12 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("✍️ Draft reply:", rendered.text)
         self.assertIn("Hi Alice, I’ll approve this shortly.", rendered.text)
         self.assertIn("↳ Open thread: https://mail.google.com/mail/u/0/#all/thread-1", rendered.text)
+        self.assertIn("Draft 1 was saved in Gmail on this thread.", rendered.text)
         self.assertIn("*Reminders*", rendered.text)
         self.assertTrue(rendered.drafts)
         self.assertEqual(rendered.drafts[0].number, 1)
         self.assertEqual(rendered.drafts[0].draft_id, "draft-1")
+        self.assertEqual(rendered.drafts[0].draft_status, "saved")
 
 
 if __name__ == "__main__":

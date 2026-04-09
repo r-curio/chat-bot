@@ -512,6 +512,13 @@ def _build_tweak_response(
     compose_url = updated_draft.get("compose_url")
     if compose_url:
         lines.append(f"↳ Open thread: {compose_url}")
+    draft_status = updated_draft.get("draft_status")
+    if draft_status == "saved":
+        lines.append("Saved as a Gmail draft on this thread.")
+    elif draft_status == "missing_compose_scope":
+        lines.append("Could not save the Gmail draft yet. Reconnect Gmail to enable in-thread drafts.")
+    elif draft_status:
+        lines.append("Could not save the Gmail draft yet.")
     lines.append(f"Saved writing style for future drafts: {style_note}")
     return "\n".join(lines).strip()
 
@@ -565,11 +572,13 @@ async def handle_tweak_request(
         draft_id=str(target.get("draft_id")) if target.get("draft_id") else None,
     )
     if draft_link:
+        updated_target["draft_status"] = draft_link.get("status")
         updated_target["draft_id"] = draft_link.get("draft_id")
         updated_target["thread_id"] = draft_link.get("thread_id") or target.get("thread_id")
         updated_target["thread_url"] = draft_link.get("thread_url")
         updated_target["compose_url"] = draft_link.get("thread_url") or target.get("compose_url")
     else:
+        updated_target["draft_status"] = "not_saved"
         updated_target["compose_url"] = updated_target.get("compose_url") or target.get("compose_url")
     target_index = None
     for idx, draft in enumerate(state.get("drafts", [])):

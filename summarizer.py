@@ -129,6 +129,7 @@ class RenderedDraftItem(BaseModel):
     message_id_header: str | None = None
     references: str | None = None
     draft_id: str | None = None
+    draft_status: str | None = None
     tweak_hint: str | None = None
 
 
@@ -509,6 +510,7 @@ def render_summary_digest(
                     message_id_header=None,
                     references=None,
                     draft_id=None,
+                    draft_status=None,
                     tweak_hint=f'tweak {item_number}: [your instruction]' if reply_needed else None,
                 )
             )
@@ -587,7 +589,12 @@ async def attach_thread_draft_links(
                 if fallback_link:
                     updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
+                updated_text += (
+                    f'\n\nDraft {updated_draft.number} was not saved in Gmail yet. '
+                    "Open the thread to reply manually."
+                )
                 updated_draft.compose_url = updated_draft.thread_url
+                updated_draft.draft_status = "not_saved"
             updated_drafts.append(updated_draft)
             continue
 
@@ -602,7 +609,7 @@ async def attach_thread_draft_links(
                 timeout=THREAD_DRAFT_TIMEOUT_SECONDS,
             )
         except TimeoutError:
-            draft_link = None
+            draft_link = {"status": "timeout"}
 
         if not draft_link:
             if updated_draft.thread_url:
@@ -615,6 +622,28 @@ async def attach_thread_draft_links(
                     updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
                 updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
                 updated_draft.compose_url = updated_draft.thread_url
+                updated_draft.draft_status = "not_saved"
+            updated_drafts.append(updated_draft)
+            continue
+
+        status = draft_link.get("status")
+        if status != "saved":
+            if updated_draft.thread_url:
+                fallback_link = _compose_url(
+                    updated_draft.sender_email,
+                    f"Re: {updated_draft.subject.strip()}",
+                    updated_draft.draft_reply,
+                )
+                if fallback_link:
+                    updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+                updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
+                updated_draft.compose_url = updated_draft.thread_url
+            updated_draft.draft_status = status
+            if status == "missing_compose_scope":
+                updated_text += (
+                    f'\n\nDraft {updated_draft.number} could not be saved in Gmail yet. '
+                    "Reconnect Gmail to enable saved in-thread drafts."
+                )
             updated_drafts.append(updated_draft)
             continue
 
@@ -622,6 +651,7 @@ async def attach_thread_draft_links(
         updated_draft.thread_id = draft_link.get("thread_id") or updated_draft.thread_id
         updated_draft.thread_url = draft_link.get("thread_url")
         updated_draft.compose_url = draft_link.get("thread_url") or updated_draft.compose_url
+        updated_draft.draft_status = "saved"
 
         fallback_link = _compose_url(
             updated_draft.sender_email,
@@ -631,6 +661,7 @@ async def attach_thread_draft_links(
         if fallback_link and updated_draft.thread_url:
             updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
         updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
+        updated_text += f"\n\nDraft {updated_draft.number} was saved in Gmail on this thread."
         updated_drafts.append(updated_draft)
 
     return SummaryResult(text=updated_text, drafts=updated_drafts)
