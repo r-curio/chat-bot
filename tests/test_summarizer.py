@@ -124,6 +124,7 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
         )
         fake_agent = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(output=digest)))
         user = {
+            "id": 1,
             "summary_style": "brief",
             "summary_length": "medium",
             "summary_focus": "all",
@@ -135,14 +136,31 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
             "include_reminders": 1,
         }
 
-        with patch("summarizer._build_agent", return_value=fake_agent):
+        with (
+            patch("summarizer._build_agent", return_value=fake_agent),
+            patch(
+                "summarizer.upsert_thread_draft",
+                new=AsyncMock(
+                    return_value={
+                        "draft_id": "draft-1",
+                        "thread_id": "thread-1",
+                        "thread_url": "https://mail.google.com/mail/u/0/#all/thread-1",
+                    }
+                ),
+            ),
+        ):
             rendered = await summarize_emails(
                 [
                     {
+                        "gmail_message_id": "gmail-1",
+                        "thread_id": "thread-1",
                         "sender": "Alice <alice@example.com>",
+                        "reply_to": "Alice <alice@example.com>",
                         "subject": "Approve invoice",
                         "snippet": "Needs action today.",
                         "received_at": "2026-04-09T08:00:00+00:00",
+                        "message_id_header": "<msg-1@example.com>",
+                        "references": "<msg-0@example.com>",
                     }
                 ],
                 user=user,
@@ -151,9 +169,11 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Urgent follow-ups.", rendered.text)
         self.assertIn("✍️ Draft reply:", rendered.text)
         self.assertIn("Hi Alice, I’ll approve this shortly.", rendered.text)
+        self.assertIn("↳ Open thread: https://mail.google.com/mail/u/0/#all/thread-1", rendered.text)
         self.assertIn("*Reminders*", rendered.text)
         self.assertTrue(rendered.drafts)
         self.assertEqual(rendered.drafts[0].number, 1)
+        self.assertEqual(rendered.drafts[0].draft_id, "draft-1")
 
 
 if __name__ == "__main__":

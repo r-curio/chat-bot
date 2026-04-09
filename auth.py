@@ -15,7 +15,10 @@ from scheduler import reschedule_summary_for_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+]
 
 
 def _encode_state(install_id: int, code_verifier: str) -> str:

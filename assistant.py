@@ -17,6 +17,7 @@ from db import (
     update_user_preferences,
     add_user_exclusion,
 )
+from gmail import upsert_thread_draft
 from scheduler import reschedule_summary_for_user, run_summary_for_user
 from summarizer import (
     SummaryResult,
@@ -510,7 +511,7 @@ def _build_tweak_response(
     lines.append(f"> {draft_reply.strip()}")
     compose_url = updated_draft.get("compose_url")
     if compose_url:
-        lines.append(f"↳ Send this: {compose_url}")
+        lines.append(f"↳ Open thread: {compose_url}")
     lines.append(f"Saved writing style for future drafts: {style_note}")
     return "\n".join(lines).strip()
 
@@ -549,7 +550,27 @@ async def handle_tweak_request(
 
     updated_target = dict(target)
     updated_target["draft_reply"] = rewritten_reply
-    updated_target["compose_url"] = updated_target.get("compose_url") or target.get("compose_url")
+    draft_link = await upsert_thread_draft(
+        user,
+        email={
+            "sender": target.get("sender"),
+            "reply_to": target.get("reply_to") or target.get("sender"),
+            "subject": target.get("subject"),
+            "thread_id": target.get("thread_id"),
+            "gmail_message_id": target.get("gmail_message_id"),
+            "message_id_header": target.get("message_id_header"),
+            "references": target.get("references"),
+        },
+        draft_reply=rewritten_reply,
+        draft_id=str(target.get("draft_id")) if target.get("draft_id") else None,
+    )
+    if draft_link:
+        updated_target["draft_id"] = draft_link.get("draft_id")
+        updated_target["thread_id"] = draft_link.get("thread_id") or target.get("thread_id")
+        updated_target["thread_url"] = draft_link.get("thread_url")
+        updated_target["compose_url"] = draft_link.get("thread_url") or target.get("compose_url")
+    else:
+        updated_target["compose_url"] = updated_target.get("compose_url") or target.get("compose_url")
     target_index = None
     for idx, draft in enumerate(state.get("drafts", [])):
         if int(draft.get("number", 0)) == draft_number:

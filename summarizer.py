@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
 from config import get_settings
+from gmail import upsert_thread_draft
 
 SYSTEM_PROMPT = (
     "You are an email assistant for Google Chat. Summarize recent Gmail from the last 24 hours into "
@@ -53,10 +54,16 @@ TIME_HINTS = (
 
 
 class EmailSummaryInput(BaseModel):
+    gmail_message_id: str | None = None
+    thread_id: str | None = None
     sender: str
+    reply_to: str | None = None
     subject: str
     snippet: str
     received_at: str | None = None
+    message_id_header: str | None = None
+    references: str | None = None
+    in_reply_to: str | None = None
 
 
 class ReminderCandidate(BaseModel):
@@ -106,11 +113,18 @@ class RenderedDraftItem(BaseModel):
     subject: str
     sender: str
     sender_email: str | None = None
+    reply_to: str | None = None
     summary: str
     time_note: str | None = None
     reply_needed: bool
     draft_reply: str | None = None
     compose_url: str | None = None
+    thread_url: str | None = None
+    thread_id: str | None = None
+    gmail_message_id: str | None = None
+    message_id_header: str | None = None
+    references: str | None = None
+    draft_id: str | None = None
     tweak_hint: str | None = None
 
 
@@ -250,6 +264,27 @@ def _compose_url(to: str | None, subject: str, body: str) -> str | None:
     encoded_subject = quote_plus(subject)
     encoded_body = quote_plus(body)
     return f"https://mail.google.com/mail/?view=cm&fs=1&tf=cm&to={encoded_to}&su={encoded_subject}&body={encoded_body}"
+
+
+def _normalize_match_value(value: str | None) -> str:
+    return (value or "").strip().casefold()
+
+
+def _find_source_email(
+    available_emails: list[dict[str, Any]],
+    *,
+    sender: str,
+    subject: str,
+) -> dict[str, Any] | None:
+    normalized_sender = _normalize_match_value(sender)
+    normalized_subject = _normalize_match_value(subject)
+    for index, email in enumerate(available_emails):
+        if (
+            _normalize_match_value(str(email.get("sender"))) == normalized_sender
+            and _normalize_match_value(str(email.get("subject"))) == normalized_subject
+        ):
+            return available_emails.pop(index)
+    return None
 
 
 def _display_sender(sender: str) -> str:
@@ -452,6 +487,7 @@ def render_summary_digest(
                     subject=item.subject,
                     sender=item.sender,
                     sender_email=email_address,
+                    reply_to=None,
                     summary=item.summary,
                     time_note=item.time_note,
                     reply_needed=reply_needed,
@@ -463,6 +499,12 @@ def render_summary_digest(
                     )
                     if reply_needed
                     else None,
+                    thread_url=None,
+                    thread_id=None,
+                    gmail_message_id=None,
+                    message_id_header=None,
+                    references=None,
+                    draft_id=None,
                     tweak_hint=f'tweak {item_number}: [your instruction]' if reply_needed else None,
                 )
             )
@@ -493,7 +535,66 @@ async def summarize_emails(
     prompt = build_summary_prompt(emails, preferences, reminder_candidates)
 
     result = await _build_agent().run(prompt)
-    return render_summary_digest(result.output, preferences, user=user)
+    rendered = render_summary_digest(result.output, preferences, user=user)
+    return await attach_thread_draft_links(rendered, emails=emails, user=user)
+
+
+async def attach_thread_draft_links(
+    summary: SummaryResult,
+    *,
+    emails: list[dict[str, Any]],
+    user: dict[str, Any],
+) -> SummaryResult:
+    available_emails = [dict(email) for email in emails]
+    updated_text = summary.text
+    updated_drafts: list[RenderedDraftItem] = []
+
+    for draft in summary.drafts:
+        updated_draft = draft.model_copy(deep=True)
+        if not updated_draft.reply_needed or not updated_draft.draft_reply:
+            updated_drafts.append(updated_draft)
+            continue
+
+        source_email = _find_source_email(
+            available_emails,
+            sender=updated_draft.sender,
+            subject=updated_draft.subject,
+        )
+        if not source_email:
+            updated_drafts.append(updated_draft)
+            continue
+
+        updated_draft.reply_to = str(source_email.get("reply_to") or source_email.get("sender") or "")
+        updated_draft.thread_id = source_email.get("thread_id")
+        updated_draft.gmail_message_id = source_email.get("gmail_message_id")
+        updated_draft.message_id_header = source_email.get("message_id_header")
+        updated_draft.references = source_email.get("references")
+
+        draft_link = await upsert_thread_draft(
+            user,
+            email=source_email,
+            draft_reply=updated_draft.draft_reply,
+        )
+        if not draft_link:
+            updated_drafts.append(updated_draft)
+            continue
+
+        updated_draft.draft_id = draft_link.get("draft_id")
+        updated_draft.thread_id = draft_link.get("thread_id") or updated_draft.thread_id
+        updated_draft.thread_url = draft_link.get("thread_url")
+        updated_draft.compose_url = draft_link.get("thread_url") or updated_draft.compose_url
+
+        fallback_link = _compose_url(
+            updated_draft.sender_email,
+            f"Re: {updated_draft.subject.strip()}",
+            updated_draft.draft_reply,
+        )
+        if fallback_link and updated_draft.thread_url:
+            updated_text = updated_text.replace(fallback_link, updated_draft.thread_url, 1)
+        updated_text = updated_text.replace("↳ Send this:", "↳ Open thread:", 1)
+        updated_drafts.append(updated_draft)
+
+    return SummaryResult(text=updated_text, drafts=updated_drafts)
 
 
 async def rewrite_draft_reply(
