@@ -18,6 +18,11 @@ from db import (
     add_user_exclusion,
 )
 from scheduler import reschedule_summary_for_user, run_summary_for_user
+from summarizer import (
+    SummaryResult,
+    apply_draft_style_tweak,
+    rewrite_draft_reply,
+)
 
 VALID_DAYS = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 VALID_STYLES = {"brief", "detailed", "executive", "bullets"}
@@ -32,6 +37,9 @@ VALID_REPLY_TONE_EXAMPLES = {
     "concise",
     "professional",
 }
+
+TWEAK_PATTERN = re.compile(r"^\s*tweak\s+(\d+)\s*:\s*(.+?)\s*$", re.IGNORECASE)
+DRAFT_STATE_KIND = "summary_drafts"
 
 AFFIRMATIVE_RESPONSES = {
     "yes",
@@ -70,6 +78,7 @@ class RouteDecision(BaseModel):
 class ToolOutcome(BaseModel):
     text: str
     queue_audio: bool = False
+    drafts: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -134,6 +143,10 @@ def _format_settings(user: dict[str, Any]) -> str:
     paused_text = "Yes" if user.get("is_paused") else "No"
     prompt_mode = user.get("summary_prompt_mode", "structured")
     reply_tone = user.get("reply_tone", "friendly, concise, and professional")
+    draft_writing_style = user.get(
+        "draft_writing_style",
+        user.get("reply_tone", "friendly, concise, and professional"),
+    )
     drafts = [
         bucket
         for bucket, enabled in (
@@ -156,6 +169,7 @@ def _format_settings(user: dict[str, Any]) -> str:
         f"- Focus: {user.get('summary_focus', 'all')}\n"
         f"- Prompt mode: {prompt_mode}\n"
         f"- Reply tone: {reply_tone}\n"
+        f"- Draft writing style: {draft_writing_style}\n"
         f"- Draft replies: {draft_text}\n"
         f"- Reminders: {reminder_text}\n"
         f"- Exclusions: {exclusion_text}"
@@ -261,6 +275,42 @@ def _parse_bool_argument(argument: str) -> bool | None:
     return None
 
 
+def _summary_draft_state(summary: SummaryResult) -> dict[str, Any]:
+    return {
+        "kind": DRAFT_STATE_KIND,
+        "drafts": [draft.model_dump() for draft in summary.drafts],
+    }
+
+
+async def save_summary_draft_state(
+    *,
+    user: dict[str, Any],
+    summary: SummaryResult,
+) -> None:
+    if not summary.drafts:
+        await clear_chat_conversation_state(user["gchat_user_id"], user["gchat_space_id"])
+        return
+    await save_chat_conversation_state(
+        user["gchat_user_id"],
+        user["gchat_space_id"],
+        _summary_draft_state(summary),
+    )
+
+
+async def _get_summary_draft_state(user: dict[str, Any]) -> dict[str, Any] | None:
+    state = await get_chat_conversation_state(user["gchat_user_id"], user["gchat_space_id"])
+    if not state or state.get("kind") != DRAFT_STATE_KIND:
+        return None
+    return state
+
+
+def _find_tweak_target(state: dict[str, Any], draft_number: int) -> dict[str, Any] | None:
+    for draft in state.get("drafts", []):
+        if int(draft.get("number", 0)) == draft_number:
+            return draft
+    return None
+
+
 async def tool_summary(context: ToolContext, _: dict[str, Any]) -> ToolOutcome:
     if not context.user.get("gmail_token_json"):
         return ToolOutcome(
@@ -271,7 +321,11 @@ async def tool_summary(context: ToolContext, _: dict[str, Any]) -> ToolOutcome:
         )
 
     summary = await run_summary_for_user(context.user)
-    return ToolOutcome(text=summary, queue_audio=True)
+    return ToolOutcome(
+        text=summary.text,
+        queue_audio=True,
+        drafts=[draft.model_dump() for draft in summary.drafts],
+    )
 
 
 async def tool_test_summary(context: ToolContext, _: dict[str, Any]) -> ToolOutcome:
@@ -284,7 +338,10 @@ async def tool_test_summary(context: ToolContext, _: dict[str, Any]) -> ToolOutc
         )
 
     summary = await run_summary_for_user(context.user)
-    return ToolOutcome(text=f"*Preview*\n{summary}")
+    return ToolOutcome(
+        text=f"*Preview*\n{summary.text}",
+        drafts=[draft.model_dump() for draft in summary.drafts],
+    )
 
 
 async def tool_settings(context: ToolContext, _: dict[str, Any]) -> ToolOutcome:
@@ -356,6 +413,7 @@ async def tool_update_summary_preferences(context: ToolContext, args: dict[str, 
     reply_tone = args.get("reply_tone")
     draft_scope = args.get("draft_scope")
     include_reminders = args.get("include_reminders")
+    draft_writing_style = args.get("draft_writing_style")
 
     updates: dict[str, Any] = {}
     confirmation_bits: list[str] = []
@@ -367,23 +425,27 @@ async def tool_update_summary_preferences(context: ToolContext, args: dict[str, 
         updates["reply_tone"] = normalized_tone
         confirmation_bits.append(f"reply tone to {normalized_tone}")
 
-        if draft_scope is not None:
-            parsed_scope = _parse_draft_scope(str(draft_scope))
-            if parsed_scope is None:
-                return ToolOutcome(text="Use: /drafts high|high,medium|off")
-            draft_high, draft_medium, draft_low = parsed_scope
-            updates["draft_replies_high"] = draft_high
-            updates["draft_replies_medium"] = draft_medium
-            updates["draft_replies_low"] = draft_low
-            scope_text = [
-                bucket
-                for bucket, enabled in (
-                    ("high", draft_high),
-                    ("medium", draft_medium),
-                )
-                if enabled
-            ]
-            confirmation_bits.append(f"draft replies for {', '.join(scope_text) if scope_text else 'none'}")
+    if draft_scope is not None:
+        parsed_scope = _parse_draft_scope(str(draft_scope))
+        if parsed_scope is None:
+            return ToolOutcome(text="Use: /drafts high|high,medium|off")
+        draft_high, draft_medium, draft_low = parsed_scope
+        updates["draft_replies_high"] = draft_high
+        updates["draft_replies_medium"] = draft_medium
+        updates["draft_replies_low"] = draft_low
+        scope_text = [
+            bucket
+            for bucket, enabled in (
+                ("high", draft_high),
+                ("medium", draft_medium),
+            )
+            if enabled
+        ]
+        confirmation_bits.append(f"draft replies for {', '.join(scope_text) if scope_text else 'none'}")
+
+    if draft_writing_style is not None:
+        updates["draft_writing_style"] = str(draft_writing_style).strip()
+        confirmation_bits.append("draft writing style updated")
 
     if include_reminders is not None:
         parsed_bool = _parse_bool_argument(str(include_reminders))
@@ -421,6 +483,86 @@ async def tool_connect_gmail(context: ToolContext, _: dict[str, Any]) -> ToolOut
         text=(
             "Connect Gmail first to enable summaries:\n"
             f"{_oauth_link(int(context.user['id']))}"
+        )
+    )
+
+
+def _parse_tweak_message(message_text: str) -> tuple[int, str] | None:
+    match = TWEAK_PATTERN.fullmatch(message_text)
+    if not match:
+        return None
+    return int(match.group(1)), match.group(2).strip()
+
+
+def _build_tweak_response(
+    *,
+    updated_draft: dict[str, Any],
+    style_note: str,
+) -> str:
+    lines = [
+        f"✍️ Updated draft for *{updated_draft.get('number', '?')}. {updated_draft.get('subject', '').strip()}*",
+    ]
+    time_note = updated_draft.get("time_note")
+    if time_note:
+        lines.append(str(time_note).strip())
+    draft_reply = updated_draft.get("draft_reply") or ""
+    lines.append("✍️ Draft reply:")
+    lines.append(f"> {draft_reply.strip()}")
+    compose_url = updated_draft.get("compose_url")
+    if compose_url:
+        lines.append(f"↳ Send this: {compose_url}")
+    lines.append(f"Saved writing style for future drafts: {style_note}")
+    return "\n".join(lines).strip()
+
+
+async def handle_tweak_request(
+    *,
+    user: dict[str, Any],
+    gchat_user_id: str,
+    gchat_space_id: str,
+    draft_number: int,
+    instruction: str,
+) -> ToolOutcome:
+    state = await _get_summary_draft_state(user)
+    if not state:
+        return ToolOutcome(text="I couldn’t find a recent draft to tweak. Ask me for a summary first.")
+
+    target = _find_tweak_target(state, draft_number)
+    if not target:
+        return ToolOutcome(text=f"I couldn’t find draft {draft_number}. Try one of the recent numbered items.")
+
+    current_style = str(user.get("draft_writing_style") or user.get("reply_tone") or "friendly, concise, and professional")
+    updated_style = apply_draft_style_tweak(current_style, instruction)
+    await update_user_preferences(
+        int(user["id"]),
+        draft_writing_style=updated_style,
+    )
+
+    rewritten_reply = await rewrite_draft_reply(
+        current_reply=str(target.get("draft_reply") or target.get("summary") or ""),
+        sender=str(target.get("sender") or ""),
+        subject=str(target.get("subject") or ""),
+        instruction=instruction,
+        writing_style=updated_style,
+        reply_tone=str(user.get("reply_tone") or "friendly, concise, and professional"),
+    )
+
+    updated_target = dict(target)
+    updated_target["draft_reply"] = rewritten_reply
+    updated_target["compose_url"] = updated_target.get("compose_url") or target.get("compose_url")
+    target_index = None
+    for idx, draft in enumerate(state.get("drafts", [])):
+        if int(draft.get("number", 0)) == draft_number:
+            target_index = idx
+            break
+    if target_index is not None:
+        state["drafts"][target_index] = updated_target
+        await save_chat_conversation_state(gchat_user_id, gchat_space_id, state)
+
+    return ToolOutcome(
+        text=_build_tweak_response(
+            updated_draft=updated_target,
+            style_note=updated_style,
         )
     )
 
@@ -597,6 +739,19 @@ async def route_chat_message(
     message_text: str,
 ) -> ToolOutcome:
     pending_state = await get_chat_conversation_state(gchat_user_id, gchat_space_id)
+    if pending_state and pending_state.get("kind") == DRAFT_STATE_KIND:
+        tweak_target = _parse_tweak_message(message_text)
+        if tweak_target:
+            draft_number, instruction = tweak_target
+            return await handle_tweak_request(
+                user=user,
+                gchat_user_id=gchat_user_id,
+                gchat_space_id=gchat_space_id,
+                draft_number=draft_number,
+                instruction=instruction,
+            )
+        pending_state = None
+
     if pending_state:
         outcome, next_state, should_clear = await handle_follow_up_message(
             user=user,

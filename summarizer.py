@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
@@ -68,6 +69,8 @@ class BucketItem(BaseModel):
     subject: str
     summary: str
     draft_reply: str | None = None
+    time_note: str | None = None
+    reply_needed: bool = True
 
 
 class BucketSection(BaseModel):
@@ -88,10 +91,30 @@ class SummaryPreferences(BaseModel):
     summary_focus: str = "all"
     summary_prompt_mode: str = "structured"
     reply_tone: str = "friendly, concise, and professional"
+    draft_writing_style: str = "friendly, concise, and professional"
     draft_replies_high: bool = True
     draft_replies_medium: bool = True
     draft_replies_low: bool = False
     include_reminders: bool = True
+
+
+class RenderedDraftItem(BaseModel):
+    number: int
+    urgency: str
+    subject: str
+    sender: str
+    sender_email: str | None = None
+    summary: str
+    time_note: str | None = None
+    reply_needed: bool
+    draft_reply: str | None = None
+    compose_url: str | None = None
+    tweak_hint: str | None = None
+
+
+class SummaryResult(BaseModel):
+    text: str
+    drafts: list[RenderedDraftItem] = Field(default_factory=list)
 
 
 def _build_agent() -> Agent:
@@ -110,6 +133,7 @@ def _preferences_from_user(user: dict[str, Any]) -> SummaryPreferences:
         summary_focus=str(user.get("summary_focus", "all")),
         summary_prompt_mode=str(user.get("summary_prompt_mode", "structured")),
         reply_tone=str(user.get("reply_tone", "friendly, concise, and professional")),
+        draft_writing_style=str(user.get("draft_writing_style", user.get("reply_tone", "friendly, concise, and professional"))),
         draft_replies_high=bool(user.get("draft_replies_high", 1)),
         draft_replies_medium=bool(user.get("draft_replies_medium", 1)),
         draft_replies_low=bool(user.get("draft_replies_low", 0)),
@@ -159,6 +183,7 @@ def _preference_prompt(preferences: SummaryPreferences) -> str:
             focus_instructions.get(preferences.summary_focus, focus_instructions["all"]),
             f"Prompt mode: {preferences.summary_prompt_mode}.",
             f"Draft replies using this tone: {preferences.reply_tone}.",
+            f"Draft writing style: {preferences.draft_writing_style}.",
             f"Draft replies are enabled for: {draft_scope}.",
             reminder_text,
         ]
@@ -208,6 +233,74 @@ def build_reminder_candidates(
     return candidates
 
 
+def _extract_email_address(sender: str) -> str | None:
+    match = re.search(r"<([^>]+)>", sender)
+    if match:
+        return match.group(1).strip().lower()
+    sender = sender.strip().lower()
+    return sender if "@" in sender else None
+
+
+def _compose_url(to: str | None, subject: str, body: str) -> str | None:
+    if not to:
+        return None
+    encoded_to = quote_plus(to)
+    encoded_subject = quote_plus(subject)
+    encoded_body = quote_plus(body)
+    return f"https://mail.google.com/mail/?view=cm&fs=1&tf=cm&to={encoded_to}&su={encoded_subject}&body={encoded_body}"
+
+
+def _display_sender(sender: str) -> str:
+    match = re.search(r"^(.+?)\s*<([^>]+)>$", sender.strip())
+    if match:
+        name = match.group(1).strip()
+        email = match.group(2).strip()
+        domain = email.split("@", 1)[1] if "@" in email else email
+        org = domain.split(".", 1)[0].replace("-", " ").title()
+        if name:
+            return f"{name} @ {org}"
+        return email
+    return sender.strip()
+
+
+def _format_date_heading(user: dict[str, Any] | None) -> str:
+    timezone_name = str((user or {}).get("summary_timezone", "UTC"))
+    now = datetime.now(ZoneInfo(timezone_name))
+    return f"{now:%b} {now.day}, {now:%Y}"
+
+
+def _merge_style_note(current: str, instruction: str) -> str:
+    current = current.strip()
+    instruction = instruction.strip()
+    if not current:
+        return instruction
+    if not instruction:
+        return current
+    if instruction.lower() in current.lower():
+        return current
+    return f"{current}; {instruction}"
+
+
+def apply_draft_style_tweak(current_style: str, instruction: str) -> str:
+    instruction = instruction.strip()
+    normalized = instruction.lower()
+    if any(keyword in normalized for keyword in ("warmer", "warm", "friendlier", "friendly")):
+        return _merge_style_note(current_style, "warmer and more friendly")
+    if any(keyword in normalized for keyword in ("direct", "shorter", "concise", "brief")):
+        return _merge_style_note(current_style, "more direct and concise")
+    if any(keyword in normalized for keyword in ("professional", "formal")):
+        return _merge_style_note(current_style, "more professional and polished")
+    return _merge_style_note(current_style, instruction)
+
+
+def _bucket_header(urgency: str) -> str:
+    return {
+        "high": "🔴 *Urgent*",
+        "medium": "🟡 *Action needed*",
+        "low": "⚪ *Low priority*",
+    }.get(urgency, f"*{urgency.title()}*")
+
+
 def build_summary_prompt(
     emails: list[dict[str, str]],
     preferences: SummaryPreferences,
@@ -217,7 +310,9 @@ def build_summary_prompt(
     reminder_json = [candidate.model_dump() for candidate in reminder_candidates]
     return (
         "Classify these unread emails into three buckets: high, medium, and low urgency. "
-        "For each bucket, write one concise summary sentence and itemize the most relevant emails. "
+        "For each bucket, write one concise summary sentence and itemize the most relevant emails in the same order as the input. "
+        "For each item, provide sender, subject, summary, a short time_note if the email mentions a meeting time or deadline, "
+        "and a draft_reply when the item should be replied to. Use null for draft_reply and reply_needed=false when no reply is needed. "
         "For high and medium urgency, include a short draft reply for each item when draft replies are enabled. "
         "Do not include draft replies in low urgency. "
         "For reminders, convert only the provided reminder candidates into short same-day reminder lines if reminders are enabled. "
@@ -228,40 +323,84 @@ def build_summary_prompt(
     )
 
 
-def _render_bucket(title: str, section: BucketSection, *, show_drafts: bool) -> list[str]:
-    lines = [f"*{title} urgency*", f"- {section.summary.strip()}"]
-    if not section.items:
-        lines.append("- None")
-        return lines
+def render_summary_digest(
+    digest: SummaryDigest,
+    preferences: SummaryPreferences,
+    *,
+    user: dict[str, Any] | None = None,
+) -> SummaryResult:
+    sections: list[str] = [f"📬 *Email Summary — {_format_date_heading(user)}*"]
+    rendered_drafts: list[RenderedDraftItem] = []
+    item_number = 1
+    urgency_order = [
+        ("high", digest.high, preferences.draft_replies_high),
+        ("medium", digest.medium, preferences.draft_replies_medium),
+        ("low", digest.low, False),
+    ]
 
-    for item in section.items:
-        lines.append(f"- *{item.subject}* from {item.sender}: {item.summary.strip()}")
-        if show_drafts and item.draft_reply:
-            lines.append(f"  - Draft reply: {item.draft_reply.strip()}")
-    return lines
+    for urgency, section, show_drafts in urgency_order:
+        sections.append(_bucket_header(urgency))
+        sections.append(f"- {section.summary.strip()}" if section.summary.strip() else "- None")
+        if not section.items:
+            continue
+        for item in section.items:
+            title = f"*{item_number}. {item.subject.strip()} — {_display_sender(item.sender)}*"
+            if item.time_note:
+                title += f"\n{item.time_note.strip()}"
+            sections.append(title)
 
+            email_address = _extract_email_address(item.sender)
+            reply_needed = bool(item.reply_needed and item.draft_reply)
+            if reply_needed and show_drafts:
+                sections.append("✍️ Draft reply:")
+                sections.append(f"> {item.draft_reply.strip()}")
+                compose_url = _compose_url(
+                    email_address,
+                    f"Re: {item.subject.strip()}",
+                    item.draft_reply.strip(),
+                )
+                if compose_url:
+                    sections.append(f"↳ Send this: {compose_url}")
+                sections.append(f'💬 Reply "tweak {item_number}: [your instruction]" to update this draft')
+            else:
+                sections.append(f"> No reply needed — {item.summary.strip()}")
 
-def render_summary_digest(digest: SummaryDigest, preferences: SummaryPreferences) -> str:
-    sections: list[str] = []
-    sections.append("\n".join(_render_bucket("High", digest.high, show_drafts=preferences.draft_replies_high)))
-    sections.append("\n".join(_render_bucket("Medium", digest.medium, show_drafts=preferences.draft_replies_medium)))
-    sections.append("\n".join(_render_bucket("Low", digest.low, show_drafts=False)))
+            rendered_drafts.append(
+                RenderedDraftItem(
+                    number=item_number,
+                    urgency=urgency,
+                    subject=item.subject,
+                    sender=item.sender,
+                    sender_email=email_address,
+                    summary=item.summary,
+                    time_note=item.time_note,
+                    reply_needed=reply_needed,
+                    draft_reply=item.draft_reply if reply_needed else None,
+                    compose_url=_compose_url(
+                        email_address,
+                        f"Re: {item.subject.strip()}",
+                        item.draft_reply.strip() if item.draft_reply else item.summary.strip(),
+                    ),
+                    tweak_hint=f'tweak {item_number}: [your instruction]' if reply_needed else None,
+                )
+            )
+            item_number += 1
 
     if preferences.include_reminders and digest.reminders:
-        reminder_lines = ["*Reminders*"]
+        reminder_lines = ["⏰ *Reminders*"]
         reminder_lines.extend(f"- {reminder.strip()}" for reminder in digest.reminders)
         sections.append("\n".join(reminder_lines))
 
-    return "\n\n".join(section for section in sections if section).strip()
+    return SummaryResult(text="\n\n".join(section for section in sections if section).strip(), drafts=rendered_drafts)
 
 
 async def summarize_emails(
     emails: list[dict[str, str]],
     *,
     user: dict[str, Any],
-) -> str:
+) -> SummaryResult:
     if not emails:
-        return "No unread emails right now."
+        return SummaryResult(text="No unread emails right now.", drafts=[])
 
     preferences = _preferences_from_user(user)
     reminder_candidates = (
@@ -272,4 +411,34 @@ async def summarize_emails(
     prompt = build_summary_prompt(emails, preferences, reminder_candidates)
 
     result = await _build_agent().run(prompt)
-    return render_summary_digest(result.output, preferences)
+    return render_summary_digest(result.output, preferences, user=user)
+
+
+async def rewrite_draft_reply(
+    *,
+    current_reply: str,
+    sender: str,
+    subject: str,
+    instruction: str,
+    writing_style: str,
+    reply_tone: str,
+) -> str:
+    settings = get_settings()
+    agent = Agent(
+        f"google-gla:{settings.gemini_model}",
+        system_prompt=(
+            "You rewrite email reply drafts for Google Chat users. Keep the reply natural, helpful, and concise. "
+            "Preserve the intent of the original reply, but apply the requested tweak and the user's saved writing style. "
+            "Return only the rewritten reply text."
+        ),
+    )
+    prompt = (
+        f"Original sender: {sender}\n"
+        f"Original subject: {subject}\n"
+        f"Current reply tone: {reply_tone}\n"
+        f"Current writing style: {writing_style}\n"
+        f"User instruction: {instruction}\n"
+        f"Current draft reply:\n{current_reply}\n"
+    )
+    result = await agent.run(prompt)
+    return result.output.strip()

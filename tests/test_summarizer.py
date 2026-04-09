@@ -82,13 +82,16 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = render_summary_digest(digest, preferences)
 
-        self.assertIn("*High urgency*", rendered)
-        self.assertIn("*Medium urgency*", rendered)
-        self.assertIn("*Low urgency*", rendered)
-        self.assertIn("Draft reply: Hi Alice, I reviewed it and will approve it shortly.", rendered)
-        self.assertIn("Draft reply: Thanks Ben, I’ll send the revised timeline today.", rendered)
-        self.assertNotIn("This should not be shown.", rendered)
-        self.assertIn("*Reminders*", rendered)
+        self.assertIn("🔴 *Urgent*", rendered.text)
+        self.assertIn("🟡 *Action needed*", rendered.text)
+        self.assertIn("⚪ *Low priority*", rendered.text)
+        self.assertIn("✍️ Draft reply:", rendered.text)
+        self.assertIn("Hi Alice, I reviewed it and will approve it shortly.", rendered.text)
+        self.assertIn("Thanks Ben, I’ll send the revised timeline today.", rendered.text)
+        self.assertNotIn("This should not be shown.", rendered.text)
+        self.assertIn("↳ Send this:", rendered.text)
+        self.assertIn('💬 Reply "tweak 1: [your instruction]"', rendered.text)
+        self.assertIn("*Reminders*", rendered.text)
 
     async def test_summarize_emails_uses_agent_output_and_user_preferences(self) -> None:
         digest = SummaryDigest(
@@ -143,9 +146,12 @@ class SummarizerTests(unittest.IsolatedAsyncioTestCase):
                 user=user,
             )
 
-        self.assertIn("Urgent follow-ups.", rendered)
-        self.assertIn("Draft reply: Hi Alice, I’ll approve this shortly.", rendered)
-        self.assertIn("*Reminders*", rendered)
+        self.assertIn("Urgent follow-ups.", rendered.text)
+        self.assertIn("✍️ Draft reply:", rendered.text)
+        self.assertIn("Hi Alice, I’ll approve this shortly.", rendered.text)
+        self.assertIn("*Reminders*", rendered.text)
+        self.assertTrue(rendered.drafts)
+        self.assertEqual(rendered.drafts[0].number, 1)
 
 
 if __name__ == "__main__":

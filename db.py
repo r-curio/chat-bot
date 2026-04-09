@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
     summary_focus TEXT NOT NULL DEFAULT 'all',
     summary_prompt_mode TEXT NOT NULL DEFAULT 'structured',
     reply_tone TEXT NOT NULL DEFAULT 'friendly, concise, and professional',
+    draft_writing_style TEXT NOT NULL DEFAULT 'friendly, concise, and professional',
     draft_replies_high INTEGER NOT NULL DEFAULT 1,
     draft_replies_medium INTEGER NOT NULL DEFAULT 1,
     draft_replies_low INTEGER NOT NULL DEFAULT 0,
@@ -79,6 +80,7 @@ USER_SELECT_COLUMNS = """
     summary_focus,
     summary_prompt_mode,
     reply_tone,
+    draft_writing_style,
     draft_replies_high,
     draft_replies_medium,
     draft_replies_low,
@@ -122,6 +124,7 @@ async def _ensure_users_schema(db: aiosqlite.Connection) -> None:
         "summary_focus": "TEXT NOT NULL DEFAULT 'all'",
         "summary_prompt_mode": "TEXT NOT NULL DEFAULT 'structured'",
         "reply_tone": "TEXT NOT NULL DEFAULT 'friendly, concise, and professional'",
+        "draft_writing_style": "TEXT NOT NULL DEFAULT 'friendly, concise, and professional'",
         "draft_replies_high": "INTEGER NOT NULL DEFAULT 1",
         "draft_replies_medium": "INTEGER NOT NULL DEFAULT 1",
         "draft_replies_low": "INTEGER NOT NULL DEFAULT 0",
@@ -145,6 +148,7 @@ async def _ensure_users_schema(db: aiosqlite.Connection) -> None:
             summary_focus = COALESCE(summary_focus, 'all'),
             summary_prompt_mode = COALESCE(summary_prompt_mode, 'structured'),
             reply_tone = COALESCE(reply_tone, 'friendly, concise, and professional'),
+            draft_writing_style = COALESCE(draft_writing_style, 'friendly, concise, and professional'),
             draft_replies_high = COALESCE(draft_replies_high, 1),
             draft_replies_medium = COALESCE(draft_replies_medium, 1),
             draft_replies_low = COALESCE(draft_replies_low, 0),
@@ -299,6 +303,7 @@ async def update_user_preferences(
     summary_focus: str | None = None,
     summary_prompt_mode: str | None = None,
     reply_tone: str | None = None,
+    draft_writing_style: str | None = None,
     draft_replies_high: bool | None = None,
     draft_replies_medium: bool | None = None,
     draft_replies_low: bool | None = None,
@@ -328,6 +333,9 @@ async def update_user_preferences(
     if reply_tone is not None:
         updates.append("reply_tone = ?")
         values.append(reply_tone)
+    if draft_writing_style is not None:
+        updates.append("draft_writing_style = ?")
+        values.append(draft_writing_style)
     if draft_replies_high is not None:
         updates.append("draft_replies_high = ?")
         values.append(int(draft_replies_high))

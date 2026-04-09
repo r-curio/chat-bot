@@ -13,10 +13,10 @@ from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 
 from config import Settings, get_settings
-from db import get_all_users, get_user_by_install_id
+from db import clear_chat_conversation_state, get_all_users, get_user_by_install_id, save_chat_conversation_state
 from gmail import fetch_unread_emails
 from storage import get_storage_backend, store_audio
-from summarizer import summarize_emails
+from summarizer import SummaryResult, summarize_emails
 from tts import generate_audio
 
 logger = logging.getLogger(__name__)
@@ -59,14 +59,14 @@ async def send_gchat_message(space_id: str, text: str) -> None:
         response.raise_for_status()
 
 
-async def build_summary_text_for_user(user: dict) -> str:
+async def build_summary_text_for_user(user: dict) -> SummaryResult:
     emails = await fetch_unread_emails(user)
     return await summarize_emails(emails, user=user)
 
 
-async def run_summary_for_user(user: dict) -> str:
+async def run_summary_for_user(user: dict) -> SummaryResult:
     if not user.get("gmail_token_json"):
-        return "Connect Gmail first to receive summaries."
+        return SummaryResult(text="Connect Gmail first to receive summaries.", drafts=[])
     return await build_summary_text_for_user(user)
 
 
@@ -157,9 +157,21 @@ async def send_scheduled_summary(install_id: int) -> None:
 
     try:
         summary = await build_summary_text_for_user(user)
-        await send_gchat_message(user["gchat_space_id"], summary)
+        if summary.drafts:
+            await save_chat_conversation_state(
+                user["gchat_user_id"],
+                user["gchat_space_id"],
+                {
+                    "kind": "summary_drafts",
+                    "drafts": [draft.model_dump() for draft in summary.drafts],
+                },
+            )
+        else:
+            await clear_chat_conversation_state(user["gchat_user_id"], user["gchat_space_id"])
+
+        await send_gchat_message(user["gchat_space_id"], summary.text)
         try:
-            mp3_bytes = await generate_audio(summary)
+            mp3_bytes = await generate_audio(summary.text)
             audio_location = await store_audio(str(user["gchat_user_id"]), mp3_bytes)
 
             if get_storage_backend() == "local":

@@ -15,6 +15,7 @@ from db import (
     clear_chat_conversation_state,
     delete_user,
     get_user_by_chat_ids,
+    save_chat_conversation_state,
     save_user,
     update_summary_schedule,
     update_user_preferences,
@@ -294,6 +295,23 @@ async def _send_on_demand_audio_summary(user: dict, summary: str) -> None:
         )
 
 
+async def _persist_summary_drafts(user: dict, drafts: list[dict] | None) -> None:
+    if drafts is None:
+        return
+    if not drafts:
+        await clear_chat_conversation_state(user["gchat_user_id"], user["gchat_space_id"])
+        return
+
+    await save_chat_conversation_state(
+        user["gchat_user_id"],
+        user["gchat_space_id"],
+        {
+            "kind": "summary_drafts",
+            "drafts": drafts,
+        },
+    )
+
+
 @router.post("/webhook")
 async def gchat_webhook(request: Request) -> dict:
     payload = await request.json()
@@ -342,11 +360,13 @@ async def gchat_webhook(request: Request) -> dict:
                 )
 
             summary = await run_summary_for_user(user)
+            await _persist_summary_drafts(user, [draft.model_dump() for draft in summary.drafts])
             if command_name == "/testsummary":
-                summary = f"*Preview*\n{summary}"
+                summary_text = f"*Preview*\n{summary.text}"
             elif command_name == "/summary":
-                asyncio.create_task(_send_on_demand_audio_summary(user, summary))
-            return _chat_response({"text": summary}, payload)
+                asyncio.create_task(_send_on_demand_audio_summary(user, summary.text))
+                summary_text = summary.text
+            return _chat_response({"text": summary_text}, payload)
 
         if command_name == "/settings":
             refreshed_user = await get_user_by_chat_ids(gchat_user_id, gchat_space_id) or user
@@ -504,6 +524,7 @@ async def gchat_webhook(request: Request) -> dict:
             scheduler=request.app.state.scheduler,
             message_text=message_text,
         )
+        await _persist_summary_drafts(user, routed_result.drafts)
         if routed_result.queue_audio:
             asyncio.create_task(_send_on_demand_audio_summary(user, routed_result.text))
         return _chat_response({"text": routed_result.text}, payload)

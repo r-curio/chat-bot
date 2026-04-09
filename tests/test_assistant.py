@@ -28,7 +28,16 @@ class AssistantRoutingTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("assistant.get_chat_conversation_state", new=AsyncMock(return_value=None)),
             patch("assistant.decide_route", new=AsyncMock(return_value=RouteDecision(kind="tool_call", message="", tool_name="summary", tool_args={}))),
-            patch("assistant.execute_tool", new=AsyncMock(return_value=ToolOutcome(text="summary text", queue_audio=True))),
+            patch(
+                "assistant.execute_tool",
+                new=AsyncMock(
+                    return_value=ToolOutcome(
+                        text="summary text",
+                        queue_audio=True,
+                        drafts=[{"number": 1, "subject": "Subject"}],
+                    )
+                ),
+            ),
             patch("assistant.clear_chat_conversation_state", new=AsyncMock()),
             patch("assistant.save_chat_conversation_state", new=AsyncMock()),
         ):
@@ -42,6 +51,36 @@ class AssistantRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.text, "summary text")
         self.assertTrue(outcome.queue_audio)
+
+    async def test_route_chat_message_tweak_request_uses_summary_state(self) -> None:
+        user = {"id": 1, "reply_tone": "warm", "draft_writing_style": "warm"}
+        state = {
+            "kind": "summary_drafts",
+            "drafts": [
+                {
+                    "number": 1,
+                    "subject": "Meeting invite",
+                    "sender": "Alice <alice@example.com>",
+                    "draft_reply": "Hi Alice, thanks for the invite.",
+                    "compose_url": "https://mail.google.com/mail/?view=cm",
+                }
+            ],
+        }
+        with (
+            patch("assistant.get_chat_conversation_state", new=AsyncMock(return_value=state)),
+            patch("assistant.handle_tweak_request", new=AsyncMock(return_value=ToolOutcome(text="updated draft"))),
+            patch("assistant.clear_chat_conversation_state", new=AsyncMock()),
+            patch("assistant.save_chat_conversation_state", new=AsyncMock()),
+        ):
+            outcome = await route_chat_message(
+                user=user,
+                gchat_user_id="user-1",
+                gchat_space_id="space-1",
+                scheduler=object(),
+                message_text="tweak 1: make it warmer",
+            )
+
+        self.assertEqual(outcome.text, "updated draft")
 
     async def test_route_chat_message_stores_confirmation(self) -> None:
         user = {"id": 1, "summary_hour": 8}
