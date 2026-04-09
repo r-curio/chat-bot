@@ -18,3 +18,4 @@ __pycache__/
 # Local Google credential files
 credentials.json
 chat-service-account.json
+google-application-credentials.json

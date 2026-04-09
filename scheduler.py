@@ -15,7 +15,9 @@ from google.oauth2 import service_account
 from config import Settings, get_settings
 from db import get_all_users, get_user_by_install_id
 from gmail import fetch_unread_emails
+from storage import get_storage_backend, store_audio
 from summarizer import summarize_emails
+from tts import generate_audio
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +61,7 @@ async def send_gchat_message(space_id: str, text: str) -> None:
 
 async def build_summary_text_for_user(user: dict) -> str:
     emails = await fetch_unread_emails(user)
-    return await summarize_emails(
-        emails,
-        style=str(user.get("summary_style", "brief")),
-        length=str(user.get("summary_length", "medium")),
-        focus=str(user.get("summary_focus", "all")),
-    )
+    return await summarize_emails(emails, user=user)
 
 
 async def run_summary_for_user(user: dict) -> str:
@@ -161,6 +158,25 @@ async def send_scheduled_summary(install_id: int) -> None:
     try:
         summary = await build_summary_text_for_user(user)
         await send_gchat_message(user["gchat_space_id"], summary)
+        try:
+            mp3_bytes = await generate_audio(summary)
+            audio_location = await store_audio(str(user["gchat_user_id"]), mp3_bytes)
+
+            if get_storage_backend() == "local":
+                logger.info(
+                    "Saved audio summary for user %s in %s to %s.",
+                    user["gchat_user_id"],
+                    user["gchat_space_id"],
+                    audio_location,
+                )
+            else:
+                await send_gchat_message(user["gchat_space_id"], f"🔊 Audio summary: {audio_location}")
+        except Exception:
+            logger.exception(
+                "Failed to generate or store audio summary for user %s in %s.",
+                user["gchat_user_id"],
+                user["gchat_space_id"],
+            )
     except Exception:
         logger.exception(
             "Failed to process summary for user %s in %s.",

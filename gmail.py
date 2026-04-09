@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from google.auth.transport.requests import Request
@@ -24,10 +25,11 @@ def _fetch_unread_emails_sync(token_json: str) -> tuple[list[dict[str, str]], st
         credentials.refresh(Request())
 
     service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    recent_after = int((datetime.now(UTC) - timedelta(hours=48)).timestamp())
     response = (
         service.users()
         .messages()
-        .list(userId="me", q="is:unread")
+        .list(userId="me", q=f"is:unread after:{recent_after}")
         .execute()
     )
 
@@ -47,11 +49,19 @@ def _fetch_unread_emails_sync(token_json: str) -> tuple[list[dict[str, str]], st
             .execute()
         )
         headers = {header["name"]: header["value"] for header in details.get("payload", {}).get("headers", [])}
+        internal_date = details.get("internalDate")
+        received_at = None
+        if internal_date:
+            try:
+                received_at = datetime.fromtimestamp(int(internal_date) / 1000, tz=UTC).isoformat()
+            except (TypeError, ValueError, OSError):
+                received_at = None
         emails.append(
             {
                 "sender": headers.get("From", "Unknown sender"),
                 "subject": headers.get("Subject", "(No subject)"),
                 "snippet": details.get("snippet", ""),
+                "received_at": received_at,
             }
         )
 

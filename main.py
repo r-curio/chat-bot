@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from audio import router as audio_router
 from auth import router as auth_router
 from db import init_db
 from gchat import router as gchat_router
@@ -24,6 +25,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Gmail GChat Bot", lifespan=lifespan)
+app.include_router(audio_router)
 app.include_router(auth_router)
 app.include_router(gchat_router)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -7,17 +9,27 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 from fastapi import APIRouter, Request
 
 from config import get_settings
+from assistant import route_chat_message
 from db import (
     add_user_exclusion,
+    clear_chat_conversation_state,
     delete_user,
     get_user_by_chat_ids,
     save_user,
     update_summary_schedule,
     update_user_preferences,
 )
-from scheduler import remove_summary_schedule_for_user, reschedule_summary_for_user, run_summary_for_user
+from scheduler import (
+    remove_summary_schedule_for_user,
+    reschedule_summary_for_user,
+    run_summary_for_user,
+    send_gchat_message,
+)
+from storage import get_storage_backend, store_audio
+from tts import generate_audio
 
 router = APIRouter(prefix="/gchat", tags=["gchat"])
+logger = logging.getLogger(__name__)
 
 SETTIME_PATTERN = re.compile(
     r"^/settime\s+(\d{1,2}):(\d{2})\s+([A-Za-z0-9_\-+]+(?:/[A-Za-z0-9_\-+]+)+)$"
@@ -108,6 +120,9 @@ def _help_text() -> str:
         "- `/style brief|detailed|executive|bullets` Set summary style.\n"
         "- `/length short|medium|long` Set summary length.\n"
         "- `/focus urgent|action-items|meetings|all` Set summary focus.\n"
+        "- `/replytone casual|friendly|formal|direct|warm|concise` Set draft reply tone.\n"
+        "- `/drafts high|high,medium|off` Set which urgency buckets get draft replies.\n"
+        "- `/reminders on|off` Include Gmail-based same-day reminders.\n"
         "- `/exclude sender@company.com` Exclude a sender or domain.\n\n"
         "*Utilities*\n"
         "- `/timezones [filter]` List timezone names, optionally filtered.\n"
@@ -174,10 +189,62 @@ def _parse_days(argument: str) -> str | None:
     return ",".join(ordered)
 
 
+def _normalize_reply_tone(argument: str) -> str | None:
+    tone = argument.strip()
+    if not tone:
+        return None
+    lowered = tone.lower()
+    if lowered in {"casual", "friendly", "formal", "direct", "warm", "concise", "professional"}:
+        return lowered
+    return tone
+
+
+def _parse_draft_scope(argument: str) -> tuple[bool, bool, bool] | None:
+    normalized = argument.strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"off", "none", "no", "disable"}:
+        return False, False, False
+    if normalized in {"high,medium", "high, medium", "high medium", "default"}:
+        return True, True, False
+    if normalized in {"high"}:
+        return True, False, False
+    if normalized in {"medium"}:
+        return False, True, False
+
+    tokens = {part for part in re.split(r"[,\s/]+", normalized) if part}
+    valid_tokens = {"high", "medium"}
+    if not tokens or not tokens <= valid_tokens:
+        return None
+    return ("high" in tokens, "medium" in tokens, False)
+
+
+def _parse_bool_argument(argument: str) -> bool | None:
+    normalized = argument.strip().lower()
+    if normalized in {"on", "yes", "true", "enable", "enabled"}:
+        return True
+    if normalized in {"off", "no", "false", "disable", "disabled"}:
+        return False
+    return None
+
+
 def _format_settings(user: dict) -> str:
     exclusions = user.get("exclusions", [])
     exclusion_text = ", ".join(exclusions) if exclusions else "None"
     paused_text = "Yes" if user.get("is_paused") else "No"
+    prompt_mode = user.get("summary_prompt_mode", "structured")
+    reply_tone = user.get("reply_tone", "friendly, concise, and professional")
+    drafts = [
+        bucket
+        for bucket, enabled in (
+            ("high", user.get("draft_replies_high", 1)),
+            ("medium", user.get("draft_replies_medium", 1)),
+            ("low", user.get("draft_replies_low", 0)),
+        )
+        if enabled
+    ]
+    draft_text = ", ".join(drafts) if drafts else "None"
+    reminder_text = "On" if user.get("include_reminders", 1) else "Off"
     return (
         "Your current settings:\n"
         f"- Time: {int(user.get('summary_hour', 8)):02d}:{int(user.get('summary_minute', 0)):02d} "
@@ -187,6 +254,10 @@ def _format_settings(user: dict) -> str:
         f"- Style: {user.get('summary_style', 'brief')}\n"
         f"- Length: {user.get('summary_length', 'medium')}\n"
         f"- Focus: {user.get('summary_focus', 'all')}\n"
+        f"- Prompt mode: {prompt_mode}\n"
+        f"- Reply tone: {reply_tone}\n"
+        f"- Draft replies: {draft_text}\n"
+        f"- Reminders: {reminder_text}\n"
         f"- Exclusions: {exclusion_text}"
     )
 
@@ -196,6 +267,31 @@ async def _get_or_create_user(gchat_user_id: str, gchat_space_id: str) -> dict:
     if user:
         return user
     return await save_user(gchat_user_id, gchat_space_id)
+
+
+async def _send_on_demand_audio_summary(user: dict, summary: str) -> None:
+    try:
+        mp3_bytes = await generate_audio(summary)
+        audio_location = await store_audio(str(user["gchat_user_id"]), mp3_bytes)
+
+        if get_storage_backend() == "local":
+            logger.info(
+                "Saved on-demand audio summary for user %s in %s to %s.",
+                user["gchat_user_id"],
+                user["gchat_space_id"],
+                audio_location,
+            )
+        else:
+            await send_gchat_message(
+                user["gchat_space_id"],
+                f"🔊 Audio summary: {audio_location}",
+            )
+    except Exception:
+        logger.exception(
+            "Failed to generate or store on-demand audio summary for user %s in %s.",
+            user["gchat_user_id"],
+            user["gchat_space_id"],
+        )
 
 
 @router.post("/webhook")
@@ -222,6 +318,9 @@ async def gchat_webhook(request: Request) -> dict:
         )
 
     if event_type == "MESSAGE":
+        if command_name.startswith("/"):
+            await clear_chat_conversation_state(gchat_user_id, gchat_space_id)
+
         if command_name == "/help":
             return _chat_response({"text": _help_text()}, payload)
 
@@ -245,6 +344,8 @@ async def gchat_webhook(request: Request) -> dict:
             summary = await run_summary_for_user(user)
             if command_name == "/testsummary":
                 summary = f"*Preview*\n{summary}"
+            elif command_name == "/summary":
+                asyncio.create_task(_send_on_demand_audio_summary(user, summary))
             return _chat_response({"text": summary}, payload)
 
         if command_name == "/settings":
@@ -332,9 +433,56 @@ async def gchat_webhook(request: Request) -> dict:
                 return _chat_response(
                     {"text": "Use: /focus urgent|action-items|meetings|all"},
                     payload,
-                )
+            )
             await update_user_preferences(int(user["id"]), summary_focus=focus)
             return _chat_response({"text": f"Summary focus updated to {focus}."}, payload)
+
+        if command_name == "/replytone":
+            tone = _normalize_reply_tone(command_argument)
+            if not tone:
+                return _chat_response(
+                    {"text": "Use: /replytone casual|friendly|formal|direct|warm|concise"},
+                    payload,
+                )
+            await update_user_preferences(int(user["id"]), reply_tone=tone)
+            return _chat_response({"text": f"Reply tone updated to {tone}."}, payload)
+
+        if command_name == "/drafts":
+            parsed_scope = _parse_draft_scope(command_argument)
+            if not parsed_scope:
+                return _chat_response(
+                    {"text": "Use: /drafts high|high,medium|off"},
+                    payload,
+                )
+            draft_high, draft_medium, draft_low = parsed_scope
+            scope_text = [
+                bucket
+                for bucket, enabled in (
+                    ("high", draft_high),
+                    ("medium", draft_medium),
+                )
+                if enabled
+            ]
+            await update_user_preferences(
+                int(user["id"]),
+                draft_replies_high=draft_high,
+                draft_replies_medium=draft_medium,
+                draft_replies_low=draft_low,
+            )
+            return _chat_response(
+                {"text": f"Draft replies updated to {', '.join(scope_text) if scope_text else 'none'}."},
+                payload,
+            )
+
+        if command_name == "/reminders":
+            include_reminders = _parse_bool_argument(command_argument)
+            if include_reminders is None:
+                return _chat_response({"text": "Use: /reminders on|off"}, payload)
+            await update_user_preferences(int(user["id"]), include_reminders=include_reminders)
+            return _chat_response(
+                {"text": f"Reminders turned {'on' if include_reminders else 'off'}."},
+                payload,
+            )
 
         if command_name == "/exclude":
             exclusion_value = command_argument.lower()
@@ -346,7 +494,19 @@ async def gchat_webhook(request: Request) -> dict:
             await add_user_exclusion(int(user["id"]), exclusion_value)
             return _chat_response({"text": f"Added exclusion: {exclusion_value}"}, payload)
 
-        return _chat_response({"text": _help_text()}, payload)
+        if command_name.startswith("/"):
+            return _chat_response({"text": _help_text()}, payload)
+
+        routed_result = await route_chat_message(
+            user=user,
+            gchat_user_id=gchat_user_id,
+            gchat_space_id=gchat_space_id,
+            scheduler=request.app.state.scheduler,
+            message_text=message_text,
+        )
+        if routed_result.queue_audio:
+            asyncio.create_task(_send_on_demand_audio_summary(user, routed_result.text))
+        return _chat_response({"text": routed_result.text}, payload)
 
     if event_type == "REMOVED_FROM_SPACE":
         user = await get_user_by_chat_ids(gchat_user_id, gchat_space_id)

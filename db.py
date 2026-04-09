@@ -21,6 +21,12 @@ CREATE TABLE IF NOT EXISTS users (
     summary_style TEXT NOT NULL DEFAULT 'brief',
     summary_length TEXT NOT NULL DEFAULT 'medium',
     summary_focus TEXT NOT NULL DEFAULT 'all',
+    summary_prompt_mode TEXT NOT NULL DEFAULT 'structured',
+    reply_tone TEXT NOT NULL DEFAULT 'friendly, concise, and professional',
+    draft_replies_high INTEGER NOT NULL DEFAULT 1,
+    draft_replies_medium INTEGER NOT NULL DEFAULT 1,
+    draft_replies_low INTEGER NOT NULL DEFAULT 0,
+    include_reminders INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(gchat_user_id, gchat_space_id)
 )
@@ -37,6 +43,27 @@ CREATE TABLE IF NOT EXISTS user_exclusions (
 )
 """
 
+CREATE_AUDIO_LINKS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS audio_links (
+    token TEXT PRIMARY KEY,
+    gchat_user_id TEXT NOT NULL,
+    object_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+CREATE_CHAT_STATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS chat_conversation_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gchat_user_id TEXT NOT NULL,
+    gchat_space_id TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(gchat_user_id, gchat_space_id)
+)
+"""
+
 USER_SELECT_COLUMNS = """
     id,
     gchat_user_id,
@@ -50,6 +77,12 @@ USER_SELECT_COLUMNS = """
     summary_style,
     summary_length,
     summary_focus,
+    summary_prompt_mode,
+    reply_tone,
+    draft_replies_high,
+    draft_replies_medium,
+    draft_replies_low,
+    include_reminders,
     created_at
 """
 
@@ -66,6 +99,8 @@ async def init_db() -> None:
     try:
         await db.execute(CREATE_USERS_TABLE_SQL)
         await db.execute(CREATE_USER_EXCLUSIONS_TABLE_SQL)
+        await db.execute(CREATE_AUDIO_LINKS_TABLE_SQL)
+        await db.execute(CREATE_CHAT_STATE_TABLE_SQL)
         await _ensure_users_schema(db)
         await db.commit()
     finally:
@@ -85,6 +120,12 @@ async def _ensure_users_schema(db: aiosqlite.Connection) -> None:
         "summary_style": "TEXT NOT NULL DEFAULT 'brief'",
         "summary_length": "TEXT NOT NULL DEFAULT 'medium'",
         "summary_focus": "TEXT NOT NULL DEFAULT 'all'",
+        "summary_prompt_mode": "TEXT NOT NULL DEFAULT 'structured'",
+        "reply_tone": "TEXT NOT NULL DEFAULT 'friendly, concise, and professional'",
+        "draft_replies_high": "INTEGER NOT NULL DEFAULT 1",
+        "draft_replies_medium": "INTEGER NOT NULL DEFAULT 1",
+        "draft_replies_low": "INTEGER NOT NULL DEFAULT 0",
+        "include_reminders": "INTEGER NOT NULL DEFAULT 1",
     }
     for column_name, column_sql in column_definitions.items():
         if column_name not in columns:
@@ -101,7 +142,13 @@ async def _ensure_users_schema(db: aiosqlite.Connection) -> None:
             summary_days = COALESCE(summary_days, 'Mon,Tue,Wed,Thu,Fri,Sat,Sun'),
             summary_style = COALESCE(summary_style, 'brief'),
             summary_length = COALESCE(summary_length, 'medium'),
-            summary_focus = COALESCE(summary_focus, 'all')
+            summary_focus = COALESCE(summary_focus, 'all'),
+            summary_prompt_mode = COALESCE(summary_prompt_mode, 'structured'),
+            reply_tone = COALESCE(reply_tone, 'friendly, concise, and professional'),
+            draft_replies_high = COALESCE(draft_replies_high, 1),
+            draft_replies_medium = COALESCE(draft_replies_medium, 1),
+            draft_replies_low = COALESCE(draft_replies_low, 0),
+            include_reminders = COALESCE(include_reminders, 1)
         """,
         (settings.timezone,),
     )
@@ -250,6 +297,12 @@ async def update_user_preferences(
     summary_style: str | None = None,
     summary_length: str | None = None,
     summary_focus: str | None = None,
+    summary_prompt_mode: str | None = None,
+    reply_tone: str | None = None,
+    draft_replies_high: bool | None = None,
+    draft_replies_medium: bool | None = None,
+    draft_replies_low: bool | None = None,
+    include_reminders: bool | None = None,
 ) -> None:
     updates: list[str] = []
     values: list[Any] = []
@@ -269,6 +322,24 @@ async def update_user_preferences(
     if summary_focus is not None:
         updates.append("summary_focus = ?")
         values.append(summary_focus)
+    if summary_prompt_mode is not None:
+        updates.append("summary_prompt_mode = ?")
+        values.append(summary_prompt_mode)
+    if reply_tone is not None:
+        updates.append("reply_tone = ?")
+        values.append(reply_tone)
+    if draft_replies_high is not None:
+        updates.append("draft_replies_high = ?")
+        values.append(int(draft_replies_high))
+    if draft_replies_medium is not None:
+        updates.append("draft_replies_medium = ?")
+        values.append(int(draft_replies_medium))
+    if draft_replies_low is not None:
+        updates.append("draft_replies_low = ?")
+        values.append(int(draft_replies_low))
+    if include_reminders is not None:
+        updates.append("include_reminders = ?")
+        values.append(int(include_reminders))
 
     if not updates:
         return
@@ -310,5 +381,109 @@ async def delete_user(gchat_user_id: str, gchat_space_id: str) -> None:
             (gchat_user_id, gchat_space_id),
         )
         await db.commit()
+    finally:
+        await db.close()
+
+
+async def create_audio_link(gchat_user_id: str, object_name: str) -> str:
+    import secrets
+
+    db = await _connect()
+    try:
+        for _ in range(5):
+            token = secrets.token_urlsafe(6)
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO audio_links (token, gchat_user_id, object_name)
+                    VALUES (?, ?, ?)
+                    """,
+                    (token, gchat_user_id, object_name),
+                )
+                await db.commit()
+                return token
+            except aiosqlite.IntegrityError:
+                continue
+    finally:
+        await db.close()
+
+    raise RuntimeError("Failed to create a unique audio link token.")
+
+
+async def get_chat_conversation_state(gchat_user_id: str, gchat_space_id: str) -> dict[str, Any] | None:
+    db = await _connect()
+    try:
+        cursor = await db.execute(
+            """
+            SELECT state_json, created_at, updated_at
+            FROM chat_conversation_state
+            WHERE gchat_user_id = ? AND gchat_space_id = ?
+            """,
+            (gchat_user_id, gchat_space_id),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        state = json.loads(str(row["state_json"]))
+        state["_meta"] = {
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        return state
+    finally:
+        await db.close()
+
+
+async def save_chat_conversation_state(
+    gchat_user_id: str,
+    gchat_space_id: str,
+    state: dict[str, Any],
+) -> None:
+    db = await _connect()
+    try:
+        payload = json.dumps(state)
+        await db.execute(
+            """
+            INSERT INTO chat_conversation_state (gchat_user_id, gchat_space_id, state_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(gchat_user_id, gchat_space_id)
+            DO UPDATE SET state_json = excluded.state_json,
+                          updated_at = CURRENT_TIMESTAMP
+            """,
+            (gchat_user_id, gchat_space_id, payload),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def clear_chat_conversation_state(gchat_user_id: str, gchat_space_id: str) -> None:
+    db = await _connect()
+    try:
+        await db.execute(
+            """
+            DELETE FROM chat_conversation_state
+            WHERE gchat_user_id = ? AND gchat_space_id = ?
+            """,
+            (gchat_user_id, gchat_space_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_audio_link(token: str) -> dict[str, Any] | None:
+    db = await _connect()
+    try:
+        cursor = await db.execute(
+            """
+            SELECT token, gchat_user_id, object_name, created_at
+            FROM audio_links
+            WHERE token = ?
+            """,
+            (token,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
     finally:
         await db.close()
